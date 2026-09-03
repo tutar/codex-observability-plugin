@@ -46104,7 +46104,7 @@ function isTerminalTurnEvent(eventType) {
 
 //#endregion
 //#region src/terminal-turn.ts
-const TERMINAL_TURN_TIMEOUT_MS = 2e3;
+const TERMINAL_TURN_TIMEOUT_MS = 5e3;
 const DEFAULT_POLL_INTERVAL_MS = 25;
 function containsTerminalEvent(contents, turnId) {
 	for (const rawLine of contents.split("\n")) {

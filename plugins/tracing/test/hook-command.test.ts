@@ -198,7 +198,7 @@ describe("bundled Stop hook command", () => {
 
       expect(result.code).toBe(expectedCode);
       expect(result.stderr).toContain(
-        "timed out after 2000ms waiting for terminal event for turn turn-timeout",
+        "timed out after 5000ms waiting for terminal event for turn turn-timeout",
       );
       expect(result.stderr).toContain("no trace was uploaded; replay the hook");
       expect(fs.existsSync(`${rollout}.langfuse`)).toBe(false);
@@ -265,7 +265,9 @@ describe("bundled Stop hook command", () => {
       });
 
       const firstRun = runShellCommand(readHookCommand(), { cwd: sessionCwd, env, input });
-      setTimeout(() => fs.appendFileSync(rollout, `${terminalLine}\n`), 500);
+      // Codex can start the Stop hook while it is still persisting task_complete.
+      // The observed delay can exceed two seconds on an otherwise healthy turn.
+      setTimeout(() => fs.appendFileSync(rollout, `${terminalLine}\n`), 2_250);
       const first = await firstRun;
       expect(first.code).toBe(0);
       expect(fs.readFileSync(`${rollout}.langfuse`, "utf-8")).toBe("turn-1\n");
@@ -284,7 +286,7 @@ describe("bundled Stop hook command", () => {
         server.close((error) => (error ? reject(error) : resolve())),
       );
     },
-    10_000,
+    15_000,
   );
 
   it("runs from an arbitrary session cwd via PLUGIN_ROOT instead of a relative repo path", async () => {

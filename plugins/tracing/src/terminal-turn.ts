@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 
 import { isTerminalTurnEvent } from "./turn-lifecycle.js";
 
-export const TERMINAL_TURN_TIMEOUT_MS = 2_000;
+export const TERMINAL_TURN_TIMEOUT_MS = 5_000;
 const DEFAULT_POLL_INTERVAL_MS = 25;
 
 type WaitOptions = {
