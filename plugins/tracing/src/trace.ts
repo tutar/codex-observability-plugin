@@ -13,7 +13,7 @@ import { TraceFlags, type SpanContext } from "@opentelemetry/api";
 
 import type { Config } from "./config.js";
 import { parseSession } from "./parse.js";
-import { loadUploadedTurnIds, markTurnUploaded } from "./sidecar.js";
+import { loadUploadedTurnIds } from "./sidecar.js";
 import type { ModelStep, RolloutLine, SessionMeta, TokenUsage, ToolCall, Turn } from "./types.js";
 import { debugLog, toText, truncate } from "./utils.js";
 
@@ -329,8 +329,12 @@ function emitToolCall(
  */
 export async function convertRollout(
   rolloutFile: string,
-  options: { config: Config; parentObservation?: LangfuseObservation },
-): Promise<void> {
+  options: {
+    config: Config;
+    parentObservation?: LangfuseObservation;
+    finalizeTurnId?: string;
+  },
+): Promise<string[]> {
   const { sessionMeta, turns } = parseSession(await loadSession(rolloutFile));
   debugLog(`parsed ${turns.length} turn(s) from ${path.basename(rolloutFile)}`);
 
@@ -343,15 +347,20 @@ export async function convertRollout(
         parentObservation: options.parentObservation,
       });
     }
-    return;
+    return [];
   }
 
   const uploaded = await loadUploadedTurnIds(rolloutFile);
+  const uploadedTurnIds: string[] = [];
 
   for (let turnIndex = 0; turnIndex < turns.length; turnIndex++) {
-    const turn = turns[turnIndex];
+    const parsedTurn = turns[turnIndex];
+    const turn =
+      !parsedTurn.completed && parsedTurn.turnId === options.finalizeTurnId
+        ? { ...parsedTurn, completed: true }
+        : parsedTurn;
     if (!turn.completed) {
-      debugLog(`skipping in-progress turn ${turn.turnId ?? "(unknown)"}; waiting for completion`);
+      debugLog(`skipping in-progress turn ${turn.turnId ?? "(unknown)"} not named by Stop hook`);
       continue;
     }
     if (turn.completed && turn.turnId && uploaded.has(turn.turnId)) {
@@ -381,7 +390,9 @@ export async function convertRollout(
 
     if (turn.turnId) {
       uploaded.add(turn.turnId);
-      await markTurnUploaded(rolloutFile, turn.turnId);
+      uploadedTurnIds.push(turn.turnId);
     }
   }
+
+  return uploadedTurnIds;
 }

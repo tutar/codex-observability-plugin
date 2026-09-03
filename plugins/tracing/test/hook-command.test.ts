@@ -159,23 +159,106 @@ afterEach(() => {
 });
 
 describe("bundled Stop hook command", () => {
+  it("exports the payload turn before Codex appends task_complete", async () => {
+    const codexHome = makeTempDir("lf-codex-home-");
+    const sessionCwd = makeTempDir("lf-codex-cwd-");
+    const rollout = path.join(sessionCwd, "rollout.jsonl");
+    const completed = fs.readFileSync(
+      path.join(pluginRootDir, "test/fixtures/sessions/2026/06/03/rollout-basic-main.jsonl"),
+      "utf-8",
+    );
+    const completedLines = completed.trimEnd().split("\n");
+    fs.writeFileSync(rollout, `${completedLines.slice(0, -1).join("\n")}\n`);
+
+    const exportBodies: Buffer[] = [];
+    const server = http.createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        const body = Buffer.concat(chunks);
+        exportBodies.push(request.headers["content-encoding"] === "gzip" ? gunzipSync(body) : body);
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("{}");
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+
+    const result = await runShellCommand(readHookCommand(), {
+      cwd: sessionCwd,
+      env: {
+        ...process.env,
+        PLUGIN_ROOT: pluginRootDir,
+        CODEX_HOME: codexHome,
+        HOME: codexHome,
+        TRACE_TO_LANGFUSE: "true",
+        LANGFUSE_PUBLIC_KEY: "pk-lf-test",
+        LANGFUSE_SECRET_KEY: "sk-lf-test",
+        LANGFUSE_BASE_URL: `http://127.0.0.1:${address.port}`,
+      },
+      input: JSON.stringify({
+        hook_event_name: "Stop",
+        turn_id: "turn-1",
+        transcript_path: rollout,
+      }),
+    });
+
+    expect(result.code).toBe(0);
+    expect(exportBodies).toHaveLength(1);
+    expect(fs.readFileSync(`${rollout}.langfuse`, "utf-8")).toBe("turn-1\n");
+
+    // Codex persists this only after the Stop hook process has returned.
+    fs.appendFileSync(rollout, `${completedLines.at(-1)}\n`);
+    const requestsAfterFirstRun = exportBodies.length;
+    const replay = await runShellCommand(readHookCommand(), {
+      cwd: sessionCwd,
+      env: {
+        ...process.env,
+        PLUGIN_ROOT: pluginRootDir,
+        CODEX_HOME: codexHome,
+        HOME: codexHome,
+        TRACE_TO_LANGFUSE: "true",
+        LANGFUSE_PUBLIC_KEY: "pk-lf-test",
+        LANGFUSE_SECRET_KEY: "sk-lf-test",
+        LANGFUSE_BASE_URL: `http://127.0.0.1:${address.port}`,
+      },
+      input: JSON.stringify({
+        hook_event_name: "Stop",
+        turn_id: "turn-1",
+        transcript_path: rollout,
+      }),
+    });
+    expect(replay.code).toBe(0);
+    expect(exportBodies).toHaveLength(requestsAfterFirstRun);
+    expect(fs.readFileSync(`${rollout}.langfuse`, "utf-8")).toBe("turn-1\n");
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  });
+
   it.each([
     { failOnError: false, expectedCode: 0 },
     { failOnError: true, expectedCode: 1 },
   ])(
-    "times out observably without uploading when fail_on_error=$failOnError",
+    "keeps a failed flush retryable when fail_on_error=$failOnError",
     async ({ failOnError, expectedCode }) => {
       const codexHome = makeTempDir("lf-codex-home-");
       const sessionCwd = makeTempDir("lf-codex-cwd-");
       const rollout = path.join(sessionCwd, "rollout.jsonl");
-      fs.writeFileSync(
-        rollout,
-        `${JSON.stringify({
-          timestamp: "2026-09-03T00:00:00.000Z",
-          type: "event_msg",
-          payload: { type: "task_started", turn_id: "turn-timeout" },
-        })}\n`,
+      const completed = fs.readFileSync(
+        path.join(pluginRootDir, "test/fixtures/sessions/2026/06/03/rollout-basic-main.jsonl"),
+        "utf-8",
       );
+      fs.writeFileSync(rollout, `${completed.trimEnd().split("\n").slice(0, -1).join("\n")}\n`);
+
+      const server = http.createServer((_request, response) => {
+        response.writeHead(503, { "content-type": "application/json" });
+        response.end('{"error":"unavailable"}');
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected a TCP address");
 
       const result = await runShellCommand(readHookCommand(), {
         cwd: sessionCwd,
@@ -187,106 +270,24 @@ describe("bundled Stop hook command", () => {
           TRACE_TO_LANGFUSE: "true",
           LANGFUSE_PUBLIC_KEY: "pk-lf-test",
           LANGFUSE_SECRET_KEY: "sk-lf-test",
+          LANGFUSE_BASE_URL: `http://127.0.0.1:${address.port}`,
           LANGFUSE_CODEX_FAIL_ON_ERROR: String(failOnError),
         },
         input: JSON.stringify({
           hook_event_name: "Stop",
-          turn_id: "turn-timeout",
+          turn_id: "turn-1",
           transcript_path: rollout,
         }),
       });
 
       expect(result.code).toBe(expectedCode);
-      expect(result.stderr).toContain(
-        "timed out after 5000ms waiting for terminal event for turn turn-timeout",
-      );
-      expect(result.stderr).toContain("no trace was uploaded; replay the hook");
+      expect(result.stderr).toContain("telemetry export failed; turn remains retryable");
       expect(fs.existsSync(`${rollout}.langfuse`)).toBe(false);
-    },
-    10_000,
-  );
-
-  it.each(["task_complete", "turn_aborted"])(
-    "waits for a delayed %s event and records the final turn once",
-    async (terminalEvent) => {
-      const codexHome = makeTempDir("lf-codex-home-");
-      const sessionCwd = makeTempDir("lf-codex-cwd-");
-      const installedPluginRoot = makeTempDir("lf-codex-installed-plugin-");
-      fs.mkdirSync(path.join(installedPluginRoot, "dist"));
-      fs.copyFileSync(
-        path.join(pluginRootDir, "dist/index.mjs"),
-        path.join(installedPluginRoot, "dist/index.mjs"),
-      );
-      const rollout = path.join(sessionCwd, "rollout.jsonl");
-      const completed = fs.readFileSync(
-        path.join(pluginRootDir, "test/fixtures/sessions/2026/06/03/rollout-basic-main.jsonl"),
-        "utf-8",
-      );
-      const completedLines = completed.trimEnd().split("\n");
-      const terminalRecord = JSON.parse(completedLines.at(-1)!) as {
-        timestamp: string;
-        payload: { type: string; turn_id: string };
-      };
-      terminalRecord.payload.type = terminalEvent;
-      const terminalLine = JSON.stringify(terminalRecord);
-      fs.writeFileSync(rollout, `${completedLines.slice(0, -1).join("\n")}\n`);
-
-      const exportBodies: Buffer[] = [];
-      const server = http.createServer((request, response) => {
-        const chunks: Buffer[] = [];
-        request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-        request.on("end", () => {
-          const body = Buffer.concat(chunks);
-          exportBodies.push(
-            request.headers["content-encoding"] === "gzip" ? gunzipSync(body) : body,
-          );
-          response.writeHead(200, { "content-type": "application/json" });
-          response.end("{}");
-        });
-      });
-      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-      const address = server.address();
-      if (!address || typeof address === "string") throw new Error("expected a TCP address");
-
-      const env = {
-        ...process.env,
-        PLUGIN_ROOT: installedPluginRoot,
-        CODEX_HOME: codexHome,
-        HOME: codexHome,
-        TRACE_TO_LANGFUSE: "true",
-        LANGFUSE_PUBLIC_KEY: "pk-lf-test",
-        LANGFUSE_SECRET_KEY: "sk-lf-test",
-        LANGFUSE_BASE_URL: `http://127.0.0.1:${address.port}`,
-      };
-      const input = JSON.stringify({
-        hook_event_name: "Stop",
-        turn_id: "turn-1",
-        transcript_path: rollout,
-      });
-
-      const firstRun = runShellCommand(readHookCommand(), { cwd: sessionCwd, env, input });
-      // Codex can start the Stop hook while it is still persisting task_complete.
-      // The observed delay can exceed two seconds on an otherwise healthy turn.
-      setTimeout(() => fs.appendFileSync(rollout, `${terminalLine}\n`), 2_250);
-      const first = await firstRun;
-      expect(first.code).toBe(0);
-      expect(fs.readFileSync(`${rollout}.langfuse`, "utf-8")).toBe("turn-1\n");
-      expect(exportBodies).toHaveLength(1);
-      const spans = exportedSpans(exportBodies[0]);
-      expect(new Set(spans.map((span) => span.traceId)).size).toBe(1);
-      const root = spans.find((span) => span.parentSpanId === "");
-      expect(root).toBeDefined();
-      expect(root!.endTimeUnixNano).toBe(BigInt(Date.parse(terminalRecord.timestamp)) * 1_000_000n);
-
-      const requestsAfterFirstRun = exportBodies.length;
-      const second = await runShellCommand(readHookCommand(), { cwd: sessionCwd, env, input });
-      expect(second.code).toBe(0);
-      expect(exportBodies).toHaveLength(requestsAfterFirstRun);
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
     },
-    15_000,
+    10_000,
   );
 
   it("runs from an arbitrary session cwd via PLUGIN_ROOT instead of a relative repo path", async () => {
@@ -300,6 +301,7 @@ describe("bundled Stop hook command", () => {
         PLUGIN_ROOT: pluginRootDir,
         CODEX_HOME: codexHome,
         HOME: codexHome,
+        TRACE_TO_LANGFUSE: "false",
       },
       input: JSON.stringify({
         hook_event_name: "Stop",

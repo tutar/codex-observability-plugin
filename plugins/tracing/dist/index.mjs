@@ -7095,11 +7095,11 @@ var INITIAL_RETRY_DELAY = 1e3;
 var MAX_RETRY_DELAY = 6e4;
 var DEFAULT_MAX_RETRIES = 2;
 var JITTER_FACTOR = .2;
-function addPositiveJitter(delay$1) {
-	return delay$1 * (1 + Math.random() * JITTER_FACTOR);
+function addPositiveJitter(delay) {
+	return delay * (1 + Math.random() * JITTER_FACTOR);
 }
-function addSymmetricJitter(delay$1) {
-	return delay$1 * (1 + (Math.random() - .5) * JITTER_FACTOR);
+function addSymmetricJitter(delay) {
+	return delay * (1 + (Math.random() - .5) * JITTER_FACTOR);
 }
 function getRetryDelayFromHeaders(response, retryAttempt) {
 	const retryAfter = response.headers.get("Retry-After");
@@ -7108,16 +7108,16 @@ function getRetryDelayFromHeaders(response, retryAttempt) {
 		if (!isNaN(retryAfterSeconds) && retryAfterSeconds > 0) return Math.min(retryAfterSeconds * 1e3, MAX_RETRY_DELAY);
 		const retryAfterDate = new Date(retryAfter);
 		if (!isNaN(retryAfterDate.getTime())) {
-			const delay$1 = retryAfterDate.getTime() - Date.now();
-			if (delay$1 > 0) return Math.min(Math.max(delay$1, 0), MAX_RETRY_DELAY);
+			const delay = retryAfterDate.getTime() - Date.now();
+			if (delay > 0) return Math.min(Math.max(delay, 0), MAX_RETRY_DELAY);
 		}
 	}
 	const rateLimitReset = response.headers.get("X-RateLimit-Reset");
 	if (rateLimitReset) {
 		const resetTime = parseInt(rateLimitReset, 10);
 		if (!isNaN(resetTime)) {
-			const delay$1 = resetTime * 1e3 - Date.now();
-			if (delay$1 > 0) return addPositiveJitter(Math.min(delay$1, MAX_RETRY_DELAY));
+			const delay = resetTime * 1e3 - Date.now();
+			if (delay > 0) return addPositiveJitter(Math.min(delay, MAX_RETRY_DELAY));
 		}
 	}
 	return addSymmetricJitter(Math.min(INITIAL_RETRY_DELAY * Math.pow(2, retryAttempt), MAX_RETRY_DELAY));
@@ -7125,8 +7125,8 @@ function getRetryDelayFromHeaders(response, retryAttempt) {
 async function requestWithRetries(requestFn, maxRetries = DEFAULT_MAX_RETRIES) {
 	let response = await requestFn();
 	for (let i = 0; i < maxRetries; ++i) if ([408, 429].includes(response.status) || response.status >= 500) {
-		const delay$1 = getRetryDelayFromHeaders(response, i);
-		await new Promise((resolve) => setTimeout(resolve, delay$1));
+		const delay = getRetryDelayFromHeaders(response, i);
+		await new Promise((resolve) => setTimeout(resolve, delay));
 		response = await requestFn();
 	} else break;
 	return response;
@@ -42286,8 +42286,8 @@ function parseRetryAfterToMills(retryAfter) {
 	if (retryAfter == null) return;
 	const seconds = Number.parseInt(retryAfter, 10);
 	if (Number.isInteger(seconds)) return seconds > 0 ? seconds * 1e3 : -1;
-	const delay$1 = new Date(retryAfter).getTime() - Date.now();
-	if (delay$1 >= 0) return delay$1;
+	const delay = new Date(retryAfter).getTime() - Date.now();
+	if (delay >= 0) return delay;
 	return 0;
 }
 var init_is_export_retryable = __esmMin((() => {}));
@@ -45346,9 +45346,9 @@ var MediaService = class {
 			return uploadResponse;
 		} catch (e) {
 			if (attempt === maxRetries) throw e;
-			const delay$1 = baseDelay * Math.pow(2, attempt);
+			const delay = baseDelay * Math.pow(2, attempt);
 			const jitter = Math.random() * 1e3;
-			await new Promise((resolve) => setTimeout(resolve, delay$1 + jitter));
+			await new Promise((resolve) => setTimeout(resolve, delay + jitter));
 		}
 	}
 };
@@ -46096,39 +46096,6 @@ function setupInstrumentation(config$1) {
 }
 
 //#endregion
-//#region src/turn-lifecycle.ts
-const TERMINAL_EVENT_TYPES = new Set(["task_complete", "turn_aborted"]);
-function isTerminalTurnEvent(eventType) {
-	return TERMINAL_EVENT_TYPES.has(eventType ?? "");
-}
-
-//#endregion
-//#region src/terminal-turn.ts
-const TERMINAL_TURN_TIMEOUT_MS = 5e3;
-const DEFAULT_POLL_INTERVAL_MS = 25;
-function containsTerminalEvent(contents, turnId) {
-	for (const rawLine of contents.split("\n")) {
-		if (!rawLine) continue;
-		try {
-			const line = JSON.parse(rawLine);
-			if (line.type === "event_msg" && line.payload?.turn_id === turnId && isTerminalTurnEvent(line.payload.type)) return true;
-		} catch {}
-	}
-	return false;
-}
-const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-async function waitForTerminalTurn(rolloutFile, turnId, options = {}) {
-	const timeoutMs = options.timeoutMs ?? TERMINAL_TURN_TIMEOUT_MS;
-	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-	const deadline = Date.now() + timeoutMs;
-	while (true) {
-		if (containsTerminalEvent(await fs.readFile(rolloutFile, "utf-8"), turnId)) return true;
-		if (Date.now() >= deadline) return false;
-		await delay(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
-	}
-}
-
-//#endregion
 //#region ../../node_modules/.pnpm/@langfuse+tracing@5.4.1_@opentelemetry+api@1.9.1/node_modules/@langfuse/tracing/dist/index.mjs
 init_esm$2();
 function createTraceAttributes({ input, output } = {}) {
@@ -46588,6 +46555,13 @@ function uint8ArrayToHex(array$1) {
 }
 
 //#endregion
+//#region src/turn-lifecycle.ts
+const TERMINAL_EVENT_TYPES = new Set(["task_complete", "turn_aborted"]);
+function isTerminalTurnEvent(eventType) {
+	return TERMINAL_EVENT_TYPES.has(eventType ?? "");
+}
+
+//#endregion
 //#region src/utils.ts
 /** Read and JSON-parse the hook payload Codex writes to stdin. */
 function readStdin() {
@@ -46919,14 +46893,13 @@ function parseSession(lines) {
 //#endregion
 //#region src/sidecar.ts
 /**
-* Per-rollout dedup ledger.
+* Per-rollout delivery ledger.
 *
 * The `Stop` hook fires after every Codex turn and re-reads the whole rollout
 * file, so completed turns would be re-uploaded each time. We record uploaded
 * turn ids in a sidecar file (`<rolloutFile>.langfuse`) and skip them on
-* subsequent invocations. In-progress top-level turns are skipped until Codex
-* writes their terminal event, so partial and finalized copies are not both
-* exported.
+* subsequent invocations. The hook writes this ledger only after telemetry
+* flush succeeds, so an export failure remains retryable.
 */
 async function loadUploadedTurnIds(rolloutFile) {
 	try {
@@ -47162,13 +47135,18 @@ async function convertRollout(rolloutFile, options) {
 			rolloutFile,
 			parentObservation: options.parentObservation
 		});
-		return;
+		return [];
 	}
 	const uploaded = await loadUploadedTurnIds(rolloutFile);
+	const uploadedTurnIds = [];
 	for (let turnIndex = 0; turnIndex < turns.length; turnIndex++) {
-		const turn = turns[turnIndex];
+		const parsedTurn = turns[turnIndex];
+		const turn = !parsedTurn.completed && parsedTurn.turnId === options.finalizeTurnId ? {
+			...parsedTurn,
+			completed: true
+		} : parsedTurn;
 		if (!turn.completed) {
-			debugLog(`skipping in-progress turn ${turn.turnId ?? "(unknown)"}; waiting for completion`);
+			debugLog(`skipping in-progress turn ${turn.turnId ?? "(unknown)"} not named by Stop hook`);
 			continue;
 		}
 		if (turn.completed && turn.turnId && uploaded.has(turn.turnId)) continue;
@@ -47188,9 +47166,10 @@ async function convertRollout(rolloutFile, options) {
 		});
 		if (turn.turnId) {
 			uploaded.add(turn.turnId);
-			await markTurnUploaded(rolloutFile, turn.turnId);
+			uploadedTurnIds.push(turn.turnId);
 		}
 	}
+	return uploadedTurnIds;
 }
 
 //#endregion
@@ -47230,28 +47209,29 @@ async function runHook() {
 		debugLog("hook payload missing transcript_path; skipping");
 		return;
 	}
-	if (hookInput.turn_id) {
-		if (!await waitForTerminalTurn(hookInput.transcript_path, hookInput.turn_id)) {
-			const message = `timed out after ${TERMINAL_TURN_TIMEOUT_MS}ms waiting for terminal event for turn ${hookInput.turn_id} in ${hookInput.transcript_path}; no trace was uploaded; replay the hook after the rollout is complete`;
-			console.error(`[langfuse-codex] ${message}`);
-			if (config$1.fail_on_error) throw new Error(message);
-			return;
-		}
-	}
 	const instrumentation = setupInstrumentation(config$1);
+	let uploadedTurnIds = [];
+	let failure;
 	try {
-		await convertRollout(hookInput.transcript_path, { config: config$1 });
+		uploadedTurnIds = await convertRollout(hookInput.transcript_path, {
+			config: config$1,
+			finalizeTurnId: hookInput.turn_id ?? void 0
+		});
 	} catch (error) {
-		debugLog("failed to convert rollout:", error);
-		if (config$1.fail_on_error) throw error;
-	} finally {
-		try {
-			await instrumentation.shutdown();
-		} catch (error) {
-			debugLog("error during flush/shutdown:", error);
-			if (config$1.fail_on_error) throw error;
-		}
+		failure = error;
 	}
+	try {
+		await instrumentation.shutdown();
+	} catch (error) {
+		failure ??= error;
+	}
+	if (failure) {
+		console.error("[langfuse-codex] telemetry export failed; turn remains retryable");
+		debugLog("telemetry export failure:", failure);
+		if (config$1.fail_on_error) throw failure;
+		return;
+	}
+	for (const turnId of uploadedTurnIds) await markTurnUploaded(hookInput.transcript_path, turnId);
 }
 runHook().catch((error) => {
 	if (process.env.LANGFUSE_CODEX_DEBUG === "true") console.error("[langfuse-codex] fatal:", error);

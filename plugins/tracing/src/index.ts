@@ -1,7 +1,7 @@
 import { getConfig } from "./config.js";
 import { setupInstrumentation } from "./instrumentation.js";
-import { TERMINAL_TURN_TIMEOUT_MS, waitForTerminalTurn } from "./terminal-turn.js";
 import { convertRollout } from "./trace.js";
+import { markTurnUploaded } from "./sidecar.js";
 import type { HookInput } from "./types.js";
 import { debugLog, readStdin, setDebug } from "./utils.js";
 
@@ -45,35 +45,33 @@ export async function runHook(): Promise<void> {
     return;
   }
 
-  if (hookInput.turn_id) {
-    const terminal = await waitForTerminalTurn(hookInput.transcript_path, hookInput.turn_id);
-    if (!terminal) {
-      const message =
-        `timed out after ${TERMINAL_TURN_TIMEOUT_MS}ms waiting for terminal event ` +
-        `for turn ${hookInput.turn_id} in ${hookInput.transcript_path}; no trace was uploaded; ` +
-        "replay the hook after the rollout is complete";
-      // This must be visible even when debug logging is disabled: otherwise a
-      // fail-open timeout is indistinguishable from a successful upload.
-      // eslint-disable-next-line no-console
-      console.error(`[langfuse-codex] ${message}`);
-      if (config.fail_on_error) throw new Error(message);
-      return;
-    }
-  }
-
   const instrumentation = setupInstrumentation(config);
+  let uploadedTurnIds: string[] = [];
+  let failure: unknown;
   try {
-    await convertRollout(hookInput.transcript_path, { config });
+    uploadedTurnIds = await convertRollout(hookInput.transcript_path, {
+      config,
+      finalizeTurnId: hookInput.turn_id ?? undefined,
+    });
   } catch (error) {
-    debugLog("failed to convert rollout:", error);
-    if (config.fail_on_error) throw error;
-  } finally {
-    try {
-      await instrumentation.shutdown();
-    } catch (error) {
-      debugLog("error during flush/shutdown:", error);
-      if (config.fail_on_error) throw error;
-    }
+    failure = error;
+  }
+  try {
+    await instrumentation.shutdown();
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure) {
+    // Fail-open must still be observable, and without a sidecar entry a later
+    // hook or manual replay can retry the turn.
+    // eslint-disable-next-line no-console
+    console.error("[langfuse-codex] telemetry export failed; turn remains retryable");
+    debugLog("telemetry export failure:", failure);
+    if (config.fail_on_error) throw failure;
+    return;
+  }
+  for (const turnId of uploadedTurnIds) {
+    await markTurnUploaded(hookInput.transcript_path, turnId);
   }
 }
 
