@@ -2,6 +2,8 @@
 
 A [Codex](https://developers.openai.com/codex) plugin that traces agent turns, model calls, tool executions, token usage, and subagent threads to [Langfuse](https://langfuse.com).
 
+This repository is a maintained fork of [Langfuse's official plugin](https://github.com/langfuse/codex-observability-plugin). It carries fixes validated with Codex Stop hooks and long-running sessions on self-hosted GitHub Actions runners while the corresponding fixes are not yet available from the upstream repository.
+
 Once enabled, every Codex turn shows up in Langfuse as a trace you can inspect, debug, evaluate, and monitor for cost — turning Codex from a black box into an observable agent.
 
 ## What gets traced
@@ -27,8 +29,11 @@ Interrupted turns (where you cancel mid-response) are still uploaded and flagged
 ### 1. Add the plugin marketplace
 
 ```bash
-codex plugin marketplace add langfuse/codex-observability-plugin
+codex plugin marketplace add tutar/codex-observability-plugin --ref 0.1.1
+codex plugin add tracing@codex-observability-plugin
 ```
+
+Pinning the marketplace to `0.1.1` installs the validated release from this fork. To upgrade later, change the ref deliberately and review the release notes before trusting the new hook hash.
 
 ### 2. Enable the plugin
 
