@@ -68,6 +68,18 @@ beforeEach(() => {
 });
 
 describe("convertRollout", () => {
+  it("does not emit an incomplete top-level turn", async () => {
+    const dir = stageFixtures();
+    const file = path.join(dir, "rollout-basic-main.jsonl");
+    const lines = fs.readFileSync(file, "utf-8").trimEnd().split("\n");
+    fs.writeFileSync(file, `${lines.slice(0, -1).join("\n")}\n`);
+
+    await convertRollout(file, { config: baseConfig });
+
+    expect(exporter.getFinishedSpans()).toHaveLength(0);
+    expect(fs.existsSync(`${file}.langfuse`)).toBe(false);
+  });
+
   it("emits an agent → generation → tool tree with backdated timestamps", async () => {
     const dir = stageFixtures();
     await convertRollout(path.join(dir, "rollout-basic-main.jsonl"), { config: baseConfig });

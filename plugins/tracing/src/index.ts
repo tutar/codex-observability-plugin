@@ -1,5 +1,6 @@
 import { getConfig } from "./config.js";
 import { setupInstrumentation } from "./instrumentation.js";
+import { TERMINAL_TURN_TIMEOUT_MS, waitForTerminalTurn } from "./terminal-turn.js";
 import { convertRollout } from "./trace.js";
 import type { HookInput } from "./types.js";
 import { debugLog, readStdin, setDebug } from "./utils.js";
@@ -42,6 +43,22 @@ export async function runHook(): Promise<void> {
   if (!hookInput.transcript_path) {
     debugLog("hook payload missing transcript_path; skipping");
     return;
+  }
+
+  if (hookInput.turn_id) {
+    const terminal = await waitForTerminalTurn(hookInput.transcript_path, hookInput.turn_id);
+    if (!terminal) {
+      const message =
+        `timed out after ${TERMINAL_TURN_TIMEOUT_MS}ms waiting for terminal event ` +
+        `for turn ${hookInput.turn_id} in ${hookInput.transcript_path}; no trace was uploaded; ` +
+        "replay the hook after the rollout is complete";
+      // This must be visible even when debug logging is disabled: otherwise a
+      // fail-open timeout is indistinguishable from a successful upload.
+      // eslint-disable-next-line no-console
+      console.error(`[langfuse-codex] ${message}`);
+      if (config.fail_on_error) throw new Error(message);
+      return;
+    }
   }
 
   const instrumentation = setupInstrumentation(config);

@@ -350,6 +350,10 @@ export async function convertRollout(
 
   for (let turnIndex = 0; turnIndex < turns.length; turnIndex++) {
     const turn = turns[turnIndex];
+    if (!turn.completed) {
+      debugLog(`skipping in-progress turn ${turn.turnId ?? "(unknown)"}; waiting for completion`);
+      continue;
+    }
     if (turn.completed && turn.turnId && uploaded.has(turn.turnId)) {
       continue; // already uploaded in a previous hook invocation
     }
@@ -375,15 +379,9 @@ export async function convertRollout(
       },
     );
 
-    // Only mark completed turns as uploaded; an in-progress trailing turn is
-    // re-uploaded (and finalized) on the next hook invocation.
-    if (turn.completed && turn.turnId) {
+    if (turn.turnId) {
       uploaded.add(turn.turnId);
       await markTurnUploaded(rolloutFile, turn.turnId);
-    } else if (turn.turnId) {
-      debugLog(
-        `uploaded in-progress turn ${turn.turnId}; waiting for completion before sidecar mark`,
-      );
     }
   }
 }

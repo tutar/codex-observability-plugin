@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -11,6 +13,97 @@ const hookConfigFile = path.join(repoRoot, "plugins/tracing/hooks/hooks.json");
 const pluginRootDir = path.join(repoRoot, "plugins/tracing");
 
 const tmpDirs: string[] = [];
+
+type ProtobufField = { number: number; wireType: number; value: Buffer | bigint };
+
+function protobufFields(message: Buffer): ProtobufField[] {
+  const fields: ProtobufField[] = [];
+  let offset = 0;
+  const readVarint = (): bigint => {
+    let value = 0n;
+    let shift = 0n;
+    while (offset < message.length) {
+      const byte = message[offset++];
+      value |= BigInt(byte & 0x7f) << shift;
+      if ((byte & 0x80) === 0) return value;
+      shift += 7n;
+    }
+    throw new Error("truncated protobuf varint");
+  };
+
+  while (offset < message.length) {
+    const tag = Number(readVarint());
+    const number = tag >>> 3;
+    const wireType = tag & 7;
+    if (wireType === 0) {
+      fields.push({ number, wireType, value: readVarint() });
+    } else if (wireType === 1) {
+      const value = message.readBigUInt64LE(offset);
+      offset += 8;
+      fields.push({ number, wireType, value });
+    } else if (wireType === 2) {
+      const length = Number(readVarint());
+      const value = message.subarray(offset, offset + length);
+      offset += length;
+      fields.push({ number, wireType, value });
+    } else if (wireType === 5) {
+      offset += 4;
+    } else {
+      throw new Error(`unsupported protobuf wire type ${wireType}`);
+    }
+  }
+  return fields;
+}
+
+type ExportedSpan = { traceId: string; parentSpanId: string; endTimeUnixNano: bigint };
+
+function exportedSpans(requestBody: Buffer): ExportedSpan[] {
+  if (requestBody[0] === "{".charCodeAt(0)) {
+    const payload = JSON.parse(requestBody.toString("utf-8")) as {
+      resourceSpans?: Array<{
+        scopeSpans?: Array<{
+          spans?: Array<{
+            traceId?: string;
+            parentSpanId?: string;
+            endTimeUnixNano?: string;
+          }>;
+        }>;
+      }>;
+    };
+    return (payload.resourceSpans ?? []).flatMap((resource) =>
+      (resource.scopeSpans ?? []).flatMap((scope) =>
+        (scope.spans ?? []).map((span) => ({
+          traceId: span.traceId ?? "",
+          parentSpanId: span.parentSpanId ?? "",
+          endTimeUnixNano: BigInt(span.endTimeUnixNano ?? "0"),
+        })),
+      ),
+    );
+  }
+
+  const nested = (message: Buffer, fieldNumber: number): Buffer[] =>
+    protobufFields(message)
+      .filter((field) => field.number === fieldNumber && Buffer.isBuffer(field.value))
+      .map((field) => field.value as Buffer);
+
+  return nested(requestBody, 1).flatMap((resourceSpans) =>
+    nested(resourceSpans, 2).flatMap((scopeSpans) =>
+      nested(scopeSpans, 2).map((span) => {
+        const fields = protobufFields(span);
+        const bytes = (number: number): Buffer => {
+          const value = fields.find((field) => field.number === number)?.value;
+          return Buffer.isBuffer(value) ? value : Buffer.alloc(0);
+        };
+        const endTime = fields.find((field) => field.number === 8)?.value;
+        return {
+          traceId: bytes(1).toString("hex"),
+          parentSpanId: bytes(4).toString("hex"),
+          endTimeUnixNano: typeof endTime === "bigint" ? endTime : 0n,
+        };
+      }),
+    ),
+  );
+}
 
 function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -66,6 +159,134 @@ afterEach(() => {
 });
 
 describe("bundled Stop hook command", () => {
+  it.each([
+    { failOnError: false, expectedCode: 0 },
+    { failOnError: true, expectedCode: 1 },
+  ])(
+    "times out observably without uploading when fail_on_error=$failOnError",
+    async ({ failOnError, expectedCode }) => {
+      const codexHome = makeTempDir("lf-codex-home-");
+      const sessionCwd = makeTempDir("lf-codex-cwd-");
+      const rollout = path.join(sessionCwd, "rollout.jsonl");
+      fs.writeFileSync(
+        rollout,
+        `${JSON.stringify({
+          timestamp: "2026-09-03T00:00:00.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "turn-timeout" },
+        })}\n`,
+      );
+
+      const result = await runShellCommand(readHookCommand(), {
+        cwd: sessionCwd,
+        env: {
+          ...process.env,
+          PLUGIN_ROOT: pluginRootDir,
+          CODEX_HOME: codexHome,
+          HOME: codexHome,
+          TRACE_TO_LANGFUSE: "true",
+          LANGFUSE_PUBLIC_KEY: "pk-lf-test",
+          LANGFUSE_SECRET_KEY: "sk-lf-test",
+          LANGFUSE_CODEX_FAIL_ON_ERROR: String(failOnError),
+        },
+        input: JSON.stringify({
+          hook_event_name: "Stop",
+          turn_id: "turn-timeout",
+          transcript_path: rollout,
+        }),
+      });
+
+      expect(result.code).toBe(expectedCode);
+      expect(result.stderr).toContain(
+        "timed out after 2000ms waiting for terminal event for turn turn-timeout",
+      );
+      expect(result.stderr).toContain("no trace was uploaded; replay the hook");
+      expect(fs.existsSync(`${rollout}.langfuse`)).toBe(false);
+    },
+    10_000,
+  );
+
+  it.each(["task_complete", "turn_aborted"])(
+    "waits for a delayed %s event and records the final turn once",
+    async (terminalEvent) => {
+      const codexHome = makeTempDir("lf-codex-home-");
+      const sessionCwd = makeTempDir("lf-codex-cwd-");
+      const installedPluginRoot = makeTempDir("lf-codex-installed-plugin-");
+      fs.mkdirSync(path.join(installedPluginRoot, "dist"));
+      fs.copyFileSync(
+        path.join(pluginRootDir, "dist/index.mjs"),
+        path.join(installedPluginRoot, "dist/index.mjs"),
+      );
+      const rollout = path.join(sessionCwd, "rollout.jsonl");
+      const completed = fs.readFileSync(
+        path.join(pluginRootDir, "test/fixtures/sessions/2026/06/03/rollout-basic-main.jsonl"),
+        "utf-8",
+      );
+      const completedLines = completed.trimEnd().split("\n");
+      const terminalRecord = JSON.parse(completedLines.at(-1)!) as {
+        timestamp: string;
+        payload: { type: string; turn_id: string };
+      };
+      terminalRecord.payload.type = terminalEvent;
+      const terminalLine = JSON.stringify(terminalRecord);
+      fs.writeFileSync(rollout, `${completedLines.slice(0, -1).join("\n")}\n`);
+
+      const exportBodies: Buffer[] = [];
+      const server = http.createServer((request, response) => {
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        request.on("end", () => {
+          const body = Buffer.concat(chunks);
+          exportBodies.push(
+            request.headers["content-encoding"] === "gzip" ? gunzipSync(body) : body,
+          );
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end("{}");
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected a TCP address");
+
+      const env = {
+        ...process.env,
+        PLUGIN_ROOT: installedPluginRoot,
+        CODEX_HOME: codexHome,
+        HOME: codexHome,
+        TRACE_TO_LANGFUSE: "true",
+        LANGFUSE_PUBLIC_KEY: "pk-lf-test",
+        LANGFUSE_SECRET_KEY: "sk-lf-test",
+        LANGFUSE_BASE_URL: `http://127.0.0.1:${address.port}`,
+      };
+      const input = JSON.stringify({
+        hook_event_name: "Stop",
+        turn_id: "turn-1",
+        transcript_path: rollout,
+      });
+
+      const firstRun = runShellCommand(readHookCommand(), { cwd: sessionCwd, env, input });
+      setTimeout(() => fs.appendFileSync(rollout, `${terminalLine}\n`), 500);
+      const first = await firstRun;
+      expect(first.code).toBe(0);
+      expect(fs.readFileSync(`${rollout}.langfuse`, "utf-8")).toBe("turn-1\n");
+      expect(exportBodies).toHaveLength(1);
+      const spans = exportedSpans(exportBodies[0]);
+      expect(new Set(spans.map((span) => span.traceId)).size).toBe(1);
+      const root = spans.find((span) => span.parentSpanId === "");
+      expect(root).toBeDefined();
+      expect(root!.endTimeUnixNano).toBe(BigInt(Date.parse(terminalRecord.timestamp)) * 1_000_000n);
+
+      const requestsAfterFirstRun = exportBodies.length;
+      const second = await runShellCommand(readHookCommand(), { cwd: sessionCwd, env, input });
+      expect(second.code).toBe(0);
+      expect(exportBodies).toHaveLength(requestsAfterFirstRun);
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    },
+    10_000,
+  );
+
   it("runs from an arbitrary session cwd via PLUGIN_ROOT instead of a relative repo path", async () => {
     const codexHome = makeTempDir("lf-codex-home-");
     const sessionCwd = makeTempDir("lf-codex-cwd-");
