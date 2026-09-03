@@ -9,8 +9,8 @@ import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const hookConfigFile = path.join(repoRoot, "plugins/tracing/hooks/hooks.json");
-const pluginRootDir = path.join(repoRoot, "plugins/tracing");
+const pluginRootDir = process.env.TEST_PLUGIN_ROOT ?? path.join(repoRoot, "plugins/tracing");
+const hookConfigFile = path.join(pluginRootDir, "hooks/hooks.json");
 
 const tmpDirs: string[] = [];
 
