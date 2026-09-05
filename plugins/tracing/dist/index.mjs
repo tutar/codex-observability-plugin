@@ -47057,7 +47057,7 @@ async function discoverChildTurns(parentFile, parentSession, parentTurns) {
 			}
 			const child = matches[0];
 			if (parentTurn.subagentThreadIds.includes(child.sessionMeta.sessionId)) continue;
-			assignNextChildTurn(parentTurn, child, toolCall.endTime ?? toolCall.startTime);
+			assignNextChildTurn(parentTurn, child, toolCall.startTime);
 		}
 	}
 	return result;

@@ -647,6 +647,62 @@ describe("convertRollout", () => {
     expect(attr(childTurns[1], "langfuse.observation.input")).toContain("second task");
   });
 
+  it("attributes child turns that start after the trigger call but before its output", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-trigger-race-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T16:30:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-trigger-race", history_mode: "paginated" },
+      },
+      {
+        timestamp: "2026-06-03T16:30:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-trigger-race-turn" },
+      },
+      {
+        timestamp: "2026-06-03T16:30:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-trigger-race",
+          arguments: JSON.stringify({ task_name: "worker" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T16:30:02.200Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "spawn-trigger-race", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T16:30:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-trigger-race-turn" },
+      },
+    ]);
+    const childLines = childRolloutLines({
+      threadId: "thread-trigger-race",
+      parentThreadId: "parent-trigger-race",
+      agentPath: "/root/worker",
+      turnId: "trigger-race-child-turn",
+      start: "2026-06-03T16:30:02.100Z",
+    });
+    const childMeta = childLines[0].payload as Record<string, unknown>;
+    delete childMeta.subagent_history_start_ordinal;
+    childMeta.history_mode = "paginated";
+    writeRollout(path.join(dir, "rollout-trigger-race-child.jsonl"), childLines);
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    const childTurnIds = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent")
+      .map((span) => attr(span, "langfuse.observation.metadata.codex.turn_id"));
+    expect(childTurnIds).toEqual(["trigger-race-child-turn"]);
+  });
+
   it("attributes multiple named spawns in one parent turn to their distinct children", async () => {
     const dir = stageFixtures();
     const parentFile = path.join(dir, "rollout-multiple-parent.jsonl");

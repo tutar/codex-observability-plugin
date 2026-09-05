@@ -188,7 +188,10 @@ async function discoverChildTurns(
         }
         const child = matches[0];
         if (parentTurn.subagentThreadIds.includes(child.sessionMeta.sessionId)) continue;
-        assignNextChildTurn(parentTurn, child, toolCall.endTime ?? toolCall.startTime);
+        // Collaboration starts asynchronously after the call is issued. The
+        // child may begin before the parent persists function_call_output, so
+        // the call start—not its completion—is the ordering boundary.
+        assignNextChildTurn(parentTurn, child, toolCall.startTime);
       }
     }
   }
