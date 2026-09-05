@@ -569,7 +569,7 @@ describe("convertRollout", () => {
         },
       },
       {
-        timestamp: "2026-06-03T16:01:01.100Z",
+        timestamp: "2026-06-03T16:01:01.300Z",
         type: "response_item",
         payload: { type: "function_call_output", call_id: "followup-1", output: "ok" },
       },
@@ -701,6 +701,62 @@ describe("convertRollout", () => {
       .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent")
       .map((span) => attr(span, "langfuse.observation.metadata.codex.turn_id"));
     expect(childTurnIds).toEqual(["trigger-race-child-turn"]);
+  });
+
+  it("does not attribute a child turn that starts before the trigger call", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-before-trigger-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T16:45:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-before-trigger", history_mode: "paginated" },
+      },
+      {
+        timestamp: "2026-06-03T16:45:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-before-trigger-turn" },
+      },
+      {
+        timestamp: "2026-06-03T16:45:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-before-trigger",
+          arguments: JSON.stringify({ task_name: "worker" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T16:45:02.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "spawn-before-trigger", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T16:45:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-before-trigger-turn" },
+      },
+    ]);
+    const childLines = childRolloutLines({
+      threadId: "thread-before-trigger",
+      parentThreadId: "parent-before-trigger",
+      agentPath: "/root/worker",
+      turnId: "before-trigger-child-turn",
+      start: "2026-06-03T16:45:01.900Z",
+    });
+    const childMeta = childLines[0].payload as Record<string, unknown>;
+    delete childMeta.subagent_history_start_ordinal;
+    childMeta.history_mode = "paginated";
+    writeRollout(path.join(dir, "rollout-before-trigger-child.jsonl"), childLines);
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    expect(
+      exporter
+        .getFinishedSpans()
+        .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent"),
+    ).toHaveLength(0);
   });
 
   it("attributes multiple named spawns in one parent turn to their distinct children", async () => {
