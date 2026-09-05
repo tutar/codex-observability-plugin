@@ -21,7 +21,7 @@ Parent Turn 中会启动 Child Turn 的 `spawn_agent` 或 `followup_task` 调用
 _Avoid_: Any collaboration tool call, wait event
 
 **Projected History Boundary（投影历史边界）**：
-Child Thread metadata 声明的第一个本地 rollout ordinal；更早的记录属于继承的父历史，不是 Child Turn。
+legacy/projected Child Thread metadata 声明的第一个本地 rollout ordinal；更早的记录属于继承的父历史，不是 Child Turn。Paginated History（分页历史）通过外部 history-base 引用继承内容，其自身 rollout 只保存本地记录，因此不需要该 boundary。
 _Avoid_: Array offset, spawn timestamp
 
 **Attribution（归属）**：

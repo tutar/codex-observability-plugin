@@ -176,6 +176,7 @@ export type SessionMeta = {
   baseInstructions?: string;
   parentThreadId?: string;
   agentPath?: string;
+  historyMode?: string;
   subagentHistoryStartOrdinal?: number;
   /**
    * Whether this rollout belongs to a subagent thread rather than the main

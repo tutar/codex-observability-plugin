@@ -136,7 +136,8 @@ async function discoverChildTurns(
     const candidateMeta = await loadSessionMeta(rolloutFile);
     if (
       candidateMeta?.parentThreadId === parentSession.sessionId &&
-      candidateMeta.subagentHistoryStartOrdinal !== undefined
+      (candidateMeta.subagentHistoryStartOrdinal !== undefined ||
+        candidateMeta.historyMode === "paginated")
     ) {
       const { sessionMeta, turns } = parseSession(await loadSession(rolloutFile));
       children.push({ rolloutFile, sessionMeta, turns: turns.filter((turn) => turn.completed) });

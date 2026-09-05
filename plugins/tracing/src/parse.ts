@@ -173,6 +173,7 @@ export function parseSession(lines: RolloutLine[]): {
         parent_thread_id?: string | null;
         thread_source?: string | null;
         agent_path?: string | null;
+        history_mode?: string | null;
         subagent_history_start_ordinal?: number | null;
       };
       sessionMeta = {
@@ -182,6 +183,7 @@ export function parseSession(lines: RolloutLine[]): {
         baseInstructions: p.base_instructions?.text,
         parentThreadId: typeof p.parent_thread_id === "string" ? p.parent_thread_id : undefined,
         agentPath: typeof p.agent_path === "string" ? p.agent_path : undefined,
+        historyMode: typeof p.history_mode === "string" ? p.history_mode : undefined,
         subagentHistoryStartOrdinal: isValidHistoryBoundary(p.subagent_history_start_ordinal)
           ? p.subagent_history_start_ordinal
           : undefined,

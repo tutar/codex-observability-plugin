@@ -46739,6 +46739,7 @@ function parseSession(lines) {
 				baseInstructions: p.base_instructions?.text,
 				parentThreadId: typeof p.parent_thread_id === "string" ? p.parent_thread_id : void 0,
 				agentPath: typeof p.agent_path === "string" ? p.agent_path : void 0,
+				historyMode: typeof p.history_mode === "string" ? p.history_mode : void 0,
 				subagentHistoryStartOrdinal: isValidHistoryBoundary(p.subagent_history_start_ordinal) ? p.subagent_history_start_ordinal : void 0,
 				isSubagentThread: typeof p.parent_thread_id === "string" || p.thread_source === "subagent"
 			};
@@ -47010,7 +47011,7 @@ async function discoverChildTurns(parentFile, parentSession, parentTurns) {
 	for (const rolloutFile of await listRolloutFiles(root)) {
 		if (rolloutFile === parentFile) continue;
 		const candidateMeta = await loadSessionMeta(rolloutFile);
-		if (candidateMeta?.parentThreadId === parentSession.sessionId && candidateMeta.subagentHistoryStartOrdinal !== void 0) {
+		if (candidateMeta?.parentThreadId === parentSession.sessionId && (candidateMeta.subagentHistoryStartOrdinal !== void 0 || candidateMeta.historyMode === "paginated")) {
 			const { sessionMeta, turns } = parseSession(await loadSession(rolloutFile));
 			children.push({
 				rolloutFile,

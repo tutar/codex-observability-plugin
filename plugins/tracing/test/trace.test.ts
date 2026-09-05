@@ -906,6 +906,62 @@ describe("convertRollout", () => {
     ).toHaveLength(0);
   });
 
+  it("treats a paginated child rollout without a projection boundary as local history", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-paginated-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T18:47:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-paginated", history_mode: "paginated" },
+      },
+      {
+        timestamp: "2026-06-03T18:47:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-paginated-turn" },
+      },
+      {
+        timestamp: "2026-06-03T18:47:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-paginated",
+          arguments: JSON.stringify({ task_name: "worker" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T18:47:02.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "spawn-paginated", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T18:47:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-paginated-turn" },
+      },
+    ]);
+    const childLines = childRolloutLines({
+      threadId: "thread-paginated",
+      parentThreadId: "parent-paginated",
+      agentPath: "/root/worker",
+      turnId: "paginated-child-turn",
+      start: "2026-06-03T18:47:02.200Z",
+    });
+    const childMeta = childLines[0].payload as Record<string, unknown>;
+    delete childMeta.subagent_history_start_ordinal;
+    childMeta.history_mode = "paginated";
+    writeRollout(path.join(dir, "rollout-paginated-child.jsonl"), childLines);
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    const childTurnIds = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent")
+      .map((span) => attr(span, "langfuse.observation.metadata.codex.turn_id"));
+    expect(childTurnIds).toEqual(["paginated-child-turn"]);
+  });
+
   it("fails closed when the projection boundary is not a non-negative integer", async () => {
     const dir = stageFixtures();
     const parentFile = path.join(dir, "rollout-invalid-boundary-parent.jsonl");
