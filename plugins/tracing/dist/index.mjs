@@ -46564,6 +46564,13 @@ function isTerminalTurnEvent(eventType) {
 }
 
 //#endregion
+//#region src/subagent-history.ts
+/** Codex rollout ordinal where a subagent's projected local history begins. */
+function isValidHistoryBoundary(value) {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+//#endregion
 //#region src/utils.ts
 /** Read and JSON-parse the hook payload Codex writes to stdin. */
 function readStdin() {
@@ -46732,7 +46739,7 @@ function parseSession(lines) {
 				baseInstructions: p.base_instructions?.text,
 				parentThreadId: typeof p.parent_thread_id === "string" ? p.parent_thread_id : void 0,
 				agentPath: typeof p.agent_path === "string" ? p.agent_path : void 0,
-				subagentHistoryStartOrdinal: typeof p.subagent_history_start_ordinal === "number" ? p.subagent_history_start_ordinal : void 0,
+				subagentHistoryStartOrdinal: isValidHistoryBoundary(p.subagent_history_start_ordinal) ? p.subagent_history_start_ordinal : void 0,
 				isSubagentThread: typeof p.parent_thread_id === "string" || p.thread_source === "subagent"
 			};
 			continue;
@@ -46935,7 +46942,8 @@ async function loadSession(file) {
 		} catch {}
 	}
 	const boundary = (lines.find((line) => line.type === "session_meta")?.payload)?.subagent_history_start_ordinal;
-	if (typeof boundary !== "number" || !Number.isSafeInteger(boundary)) return lines;
+	if (boundary === void 0) return lines;
+	if (!isValidHistoryBoundary(boundary)) return lines.filter((line) => line.type === "session_meta");
 	return lines.filter((line) => line.type === "session_meta" || Number.isSafeInteger(line.ordinal) && line.ordinal >= boundary);
 }
 async function loadSessionMeta(file) {
@@ -46966,16 +46974,16 @@ function normalizedAgentPath(value) {
 	if (typeof value !== "string") return void 0;
 	return value.replace(/\/+$/, "") || void 0;
 }
-function triggerName(toolCall) {
+function triggerTarget(toolCall) {
 	if (!toolCall.args || typeof toolCall.args !== "object") return void 0;
 	const args = toolCall.args;
 	if (toolCall.name === "spawn_agent") return normalizedAgentPath(args.task_name);
 	if (toolCall.name === "followup_task") return normalizedAgentPath(args.target);
 }
-function triggerMatchesAgent(trigger, candidatePath) {
+function triggerMatchesAgent(target, candidatePath) {
 	const normalizedCandidate = normalizedAgentPath(candidatePath);
 	if (!normalizedCandidate) return false;
-	return trigger.includes("/") ? trigger === normalizedCandidate : agentName(normalizedCandidate) === trigger;
+	return target.includes("/") ? target === normalizedCandidate : agentName(normalizedCandidate) === target;
 }
 async function listRolloutFiles(root) {
 	const files = [];
@@ -46996,7 +47004,7 @@ async function listRolloutFiles(root) {
 	return files;
 }
 async function discoverChildTurns(parentFile, parentSession, parentTurns) {
-	if (!parentTurns.some((turn) => turn.subagentThreadIds.length > 0 || turn.steps.some((step) => step.toolCalls.some((toolCall) => triggerName(toolCall))))) return /* @__PURE__ */ new Map();
+	if (!parentTurns.some((turn) => turn.subagentThreadIds.length > 0 || turn.steps.some((step) => step.toolCalls.some((toolCall) => triggerTarget(toolCall))))) return /* @__PURE__ */ new Map();
 	const root = path.resolve(path.dirname(parentFile), "../../..");
 	const children = [];
 	for (const rolloutFile of await listRolloutFiles(root)) {
@@ -47014,49 +47022,41 @@ async function discoverChildTurns(parentFile, parentSession, parentTurns) {
 	const result = /* @__PURE__ */ new Map();
 	const nextTurnByThread = /* @__PURE__ */ new Map();
 	const assigned = /* @__PURE__ */ new Set();
+	const assignNextChildTurn = (parentTurn, child, notBefore) => {
+		const threadId = child.sessionMeta.sessionId;
+		const turnIndex = nextTurnByThread.get(threadId) ?? 0;
+		const turn = child.turns[turnIndex];
+		if (!turn || notBefore !== void 0 && turn.startTime < notBefore) return false;
+		const key = `${threadId}:${turn.turnId ?? turnIndex}`;
+		if (assigned.has(key)) return false;
+		assigned.add(key);
+		nextTurnByThread.set(threadId, turnIndex + 1);
+		const current = result.get(parentTurn) ?? [];
+		current.push({
+			rolloutFile: child.rolloutFile,
+			sessionMeta: child.sessionMeta,
+			turn
+		});
+		result.set(parentTurn, current);
+		return true;
+	};
 	for (const parentTurn of parentTurns) {
 		for (const threadId of parentTurn.subagentThreadIds) {
 			const child = children.find((candidate) => candidate.sessionMeta.sessionId === threadId);
 			if (!child) continue;
-			const turnIndex = nextTurnByThread.get(threadId) ?? 0;
-			const turn = child.turns[turnIndex];
-			if (!turn) continue;
-			const key = `${threadId}:${turn.turnId ?? turnIndex}`;
-			if (assigned.has(key)) continue;
-			assigned.add(key);
-			nextTurnByThread.set(threadId, turnIndex + 1);
-			const current = result.get(parentTurn) ?? [];
-			current.push({
-				rolloutFile: child.rolloutFile,
-				sessionMeta: child.sessionMeta,
-				turn
-			});
-			result.set(parentTurn, current);
+			assignNextChildTurn(parentTurn, child);
 		}
 		for (const step of parentTurn.steps) for (const toolCall of step.toolCalls) {
-			const name = triggerName(toolCall);
-			if (!name) continue;
-			const matches = children.filter((child$1) => child$1.sessionMeta.agentPath && triggerMatchesAgent(name, child$1.sessionMeta.agentPath));
+			const target = triggerTarget(toolCall);
+			if (!target) continue;
+			const matches = children.filter((child$1) => child$1.sessionMeta.agentPath && triggerMatchesAgent(target, child$1.sessionMeta.agentPath));
 			if (matches.length !== 1) {
-				debugLog(`skipping ambiguous child attribution for ${toolCall.name} target ${name}: ${matches.length} metadata match(es)`);
+				debugLog(`skipping ambiguous child attribution for ${toolCall.name} target ${target}: ${matches.length} metadata match(es)`);
 				continue;
 			}
 			const child = matches[0];
 			if (parentTurn.subagentThreadIds.includes(child.sessionMeta.sessionId)) continue;
-			const turnIndex = nextTurnByThread.get(child.sessionMeta.sessionId) ?? 0;
-			const turn = child.turns[turnIndex];
-			if (!turn || turn.startTime < (toolCall.endTime ?? toolCall.startTime)) continue;
-			const key = `${child.sessionMeta.sessionId}:${turn.turnId ?? turnIndex}`;
-			if (assigned.has(key)) continue;
-			assigned.add(key);
-			nextTurnByThread.set(child.sessionMeta.sessionId, turnIndex + 1);
-			const current = result.get(parentTurn) ?? [];
-			current.push({
-				rolloutFile: child.rolloutFile,
-				sessionMeta: child.sessionMeta,
-				turn
-			});
-			result.set(parentTurn, current);
+			assignNextChildTurn(parentTurn, child, toolCall.endTime ?? toolCall.startTime);
 		}
 	}
 	return result;

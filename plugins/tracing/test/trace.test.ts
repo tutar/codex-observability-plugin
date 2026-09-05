@@ -906,6 +906,110 @@ describe("convertRollout", () => {
     ).toHaveLength(0);
   });
 
+  it("fails closed when the projection boundary is not a non-negative integer", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-invalid-boundary-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T18:50:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-invalid-boundary" },
+      },
+      {
+        timestamp: "2026-06-03T18:50:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-invalid-boundary-turn" },
+      },
+      {
+        timestamp: "2026-06-03T18:50:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "collab_agent_spawn_end",
+          call_id: "spawn-invalid-boundary",
+          new_thread_id: "thread-invalid-boundary",
+        },
+      },
+      {
+        timestamp: "2026-06-03T18:50:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-invalid-boundary-turn" },
+      },
+    ]);
+    const childLines = childRolloutLines({
+      threadId: "thread-invalid-boundary",
+      parentThreadId: "parent-invalid-boundary",
+      agentPath: "/root/worker",
+      turnId: "invalid-boundary-turn",
+      start: "2026-06-03T18:50:02.100Z",
+    });
+    (childLines[0].payload as Record<string, unknown>).subagent_history_start_ordinal = -1;
+    writeRollout(path.join(dir, "rollout-invalid-boundary-child.jsonl"), childLines);
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    expect(
+      exporter
+        .getFinishedSpans()
+        .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent"),
+    ).toHaveLength(0);
+  });
+
+  it("discovers a metadata-linked child stored in a different date directory", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-cross-date-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T23:59:58.000Z",
+        type: "session_meta",
+        payload: { id: "parent-cross-date" },
+      },
+      {
+        timestamp: "2026-06-03T23:59:59.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-cross-date-turn" },
+      },
+      {
+        timestamp: "2026-06-03T23:59:59.500Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-cross-date",
+          arguments: JSON.stringify({ task_name: "overnight" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T23:59:59.900Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "spawn-cross-date", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-04T00:00:02.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-cross-date-turn" },
+      },
+    ]);
+    const nextDayDir = path.resolve(dir, "../04");
+    writeRollout(
+      path.join(nextDayDir, "rollout-cross-date-child.jsonl"),
+      childRolloutLines({
+        threadId: "thread-cross-date",
+        parentThreadId: "parent-cross-date",
+        agentPath: "/root/overnight",
+        turnId: "cross-date-child-turn",
+        start: "2026-06-04T00:00:00.000Z",
+      }),
+    );
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    const childTurnIds = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent")
+      .map((span) => attr(span, "langfuse.observation.metadata.codex.turn_id"));
+    expect(childTurnIds).toEqual(["cross-date-child-turn"]);
+  });
+
   it("does not attribute a child turn to wait_agent and skips incomplete children", async () => {
     const dir = stageFixtures();
     const parentFile = path.join(dir, "rollout-wait-parent.jsonl");

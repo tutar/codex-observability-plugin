@@ -15,6 +15,7 @@ import type {
   Turn,
 } from "./types.js";
 import { isTerminalTurnEvent } from "./turn-lifecycle.js";
+import { isValidHistoryBoundary } from "./subagent-history.js";
 import { isPrimitive, toText } from "./utils.js";
 
 /** Extract printable text from a Codex message `content` array. */
@@ -181,10 +182,9 @@ export function parseSession(lines: RolloutLine[]): {
         baseInstructions: p.base_instructions?.text,
         parentThreadId: typeof p.parent_thread_id === "string" ? p.parent_thread_id : undefined,
         agentPath: typeof p.agent_path === "string" ? p.agent_path : undefined,
-        subagentHistoryStartOrdinal:
-          typeof p.subagent_history_start_ordinal === "number"
-            ? p.subagent_history_start_ordinal
-            : undefined,
+        subagentHistoryStartOrdinal: isValidHistoryBoundary(p.subagent_history_start_ordinal)
+          ? p.subagent_history_start_ordinal
+          : undefined,
         isSubagentThread: typeof p.parent_thread_id === "string" || p.thread_source === "subagent",
       };
       continue;

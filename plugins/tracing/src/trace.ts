@@ -16,6 +16,7 @@ import { TraceFlags, type SpanContext } from "@opentelemetry/api";
 import type { Config } from "./config.js";
 import { parseSession } from "./parse.js";
 import { loadUploadedTurnIds } from "./sidecar.js";
+import { isValidHistoryBoundary } from "./subagent-history.js";
 import type { ModelStep, RolloutLine, SessionMeta, TokenUsage, ToolCall, Turn } from "./types.js";
 import { debugLog, toText, truncate } from "./utils.js";
 
@@ -34,7 +35,10 @@ async function loadSession(file: string): Promise<RolloutLine[]> {
   const sessionPayload = lines.find((line) => line.type === "session_meta")?.payload as
     { subagent_history_start_ordinal?: unknown } | undefined;
   const boundary = sessionPayload?.subagent_history_start_ordinal;
-  if (typeof boundary !== "number" || !Number.isSafeInteger(boundary)) return lines;
+  if (boundary === undefined) return lines;
+  if (!isValidHistoryBoundary(boundary)) {
+    return lines.filter((line) => line.type === "session_meta");
+  }
   return lines.filter(
     (line) =>
       line.type === "session_meta" ||
@@ -74,7 +78,7 @@ function normalizedAgentPath(value: unknown): string | undefined {
   return normalized || undefined;
 }
 
-function triggerName(toolCall: ToolCall): string | undefined {
+function triggerTarget(toolCall: ToolCall): string | undefined {
   if (!toolCall.args || typeof toolCall.args !== "object") return undefined;
   const args = toolCall.args as Record<string, unknown>;
   if (toolCall.name === "spawn_agent") return normalizedAgentPath(args.task_name);
@@ -82,12 +86,12 @@ function triggerName(toolCall: ToolCall): string | undefined {
   return undefined;
 }
 
-function triggerMatchesAgent(trigger: string, candidatePath: string): boolean {
+function triggerMatchesAgent(target: string, candidatePath: string): boolean {
   const normalizedCandidate = normalizedAgentPath(candidatePath);
   if (!normalizedCandidate) return false;
-  return trigger.includes("/")
-    ? trigger === normalizedCandidate
-    : agentName(normalizedCandidate) === trigger;
+  return target.includes("/")
+    ? target === normalizedCandidate
+    : agentName(normalizedCandidate) === target;
 }
 
 async function listRolloutFiles(root: string): Promise<string[]> {
@@ -117,7 +121,7 @@ async function discoverChildTurns(
   const hasDiscoverySignal = parentTurns.some(
     (turn) =>
       turn.subagentThreadIds.length > 0 ||
-      turn.steps.some((step) => step.toolCalls.some((toolCall) => triggerName(toolCall))),
+      turn.steps.some((step) => step.toolCalls.some((toolCall) => triggerTarget(toolCall))),
   );
   if (!hasDiscoverySignal) return new Map();
 
@@ -142,47 +146,48 @@ async function discoverChildTurns(
   const result = new Map<Turn, ChildTurn[]>();
   const nextTurnByThread = new Map<string, number>();
   const assigned = new Set<string>();
+  const assignNextChildTurn = (
+    parentTurn: Turn,
+    child: (typeof children)[number],
+    notBefore?: number,
+  ): boolean => {
+    const threadId = child.sessionMeta.sessionId;
+    const turnIndex = nextTurnByThread.get(threadId) ?? 0;
+    const turn = child.turns[turnIndex];
+    if (!turn || (notBefore !== undefined && turn.startTime < notBefore)) return false;
+    const key = `${threadId}:${turn.turnId ?? turnIndex}`;
+    if (assigned.has(key)) return false;
+    assigned.add(key);
+    nextTurnByThread.set(threadId, turnIndex + 1);
+    const current = result.get(parentTurn) ?? [];
+    current.push({ rolloutFile: child.rolloutFile, sessionMeta: child.sessionMeta, turn });
+    result.set(parentTurn, current);
+    return true;
+  };
+
   for (const parentTurn of parentTurns) {
     for (const threadId of parentTurn.subagentThreadIds) {
       const child = children.find((candidate) => candidate.sessionMeta.sessionId === threadId);
       if (!child) continue;
-      const turnIndex = nextTurnByThread.get(threadId) ?? 0;
-      const turn = child.turns[turnIndex];
-      if (!turn) continue;
-      const key = `${threadId}:${turn.turnId ?? turnIndex}`;
-      if (assigned.has(key)) continue;
-      assigned.add(key);
-      nextTurnByThread.set(threadId, turnIndex + 1);
-      const current = result.get(parentTurn) ?? [];
-      current.push({ rolloutFile: child.rolloutFile, sessionMeta: child.sessionMeta, turn });
-      result.set(parentTurn, current);
+      assignNextChildTurn(parentTurn, child);
     }
     for (const step of parentTurn.steps) {
       for (const toolCall of step.toolCalls) {
-        const name = triggerName(toolCall);
-        if (!name) continue;
+        const target = triggerTarget(toolCall);
+        if (!target) continue;
         const matches = children.filter(
           (child) =>
-            child.sessionMeta.agentPath && triggerMatchesAgent(name, child.sessionMeta.agentPath),
+            child.sessionMeta.agentPath && triggerMatchesAgent(target, child.sessionMeta.agentPath),
         );
         if (matches.length !== 1) {
           debugLog(
-            `skipping ambiguous child attribution for ${toolCall.name} target ${name}: ${matches.length} metadata match(es)`,
+            `skipping ambiguous child attribution for ${toolCall.name} target ${target}: ${matches.length} metadata match(es)`,
           );
           continue;
         }
         const child = matches[0];
         if (parentTurn.subagentThreadIds.includes(child.sessionMeta.sessionId)) continue;
-        const turnIndex = nextTurnByThread.get(child.sessionMeta.sessionId) ?? 0;
-        const turn = child.turns[turnIndex];
-        if (!turn || turn.startTime < (toolCall.endTime ?? toolCall.startTime)) continue;
-        const key = `${child.sessionMeta.sessionId}:${turn.turnId ?? turnIndex}`;
-        if (assigned.has(key)) continue;
-        assigned.add(key);
-        nextTurnByThread.set(child.sessionMeta.sessionId, turnIndex + 1);
-        const current = result.get(parentTurn) ?? [];
-        current.push({ rolloutFile: child.rolloutFile, sessionMeta: child.sessionMeta, turn });
-        result.set(parentTurn, current);
+        assignNextChildTurn(parentTurn, child, toolCall.endTime ?? toolCall.startTime);
       }
     }
   }
