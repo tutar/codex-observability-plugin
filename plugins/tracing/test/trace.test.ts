@@ -38,6 +38,59 @@ function stageFixtures(): string {
   return path.join(dir, "sessions", "2026", "06", "03");
 }
 
+function writeRollout(file: string, lines: Array<Record<string, unknown>>): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+}
+
+function childRolloutLines(options: {
+  threadId: string;
+  parentThreadId: string;
+  agentPath: string;
+  turnId: string;
+  start: string;
+  ordinal?: number;
+  completed?: boolean;
+}): Array<Record<string, unknown>> {
+  const ordinal = options.ordinal ?? 40;
+  const start = Date.parse(options.start);
+  return [
+    {
+      timestamp: new Date(start - 100).toISOString(),
+      type: "session_meta",
+      payload: {
+        id: options.threadId,
+        parent_thread_id: options.parentThreadId,
+        thread_source: "subagent",
+        agent_path: options.agentPath,
+        subagent_history_start_ordinal: ordinal,
+      },
+    },
+    {
+      ordinal,
+      timestamp: options.start,
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: options.turnId },
+    },
+    {
+      ordinal: ordinal + 1,
+      timestamp: new Date(start + 100).toISOString(),
+      type: "event_msg",
+      payload: { type: "user_message", message: options.turnId },
+    },
+    ...(options.completed === false
+      ? []
+      : [
+          {
+            ordinal: ordinal + 2,
+            timestamp: new Date(start + 200).toISOString(),
+            type: "event_msg",
+            payload: { type: "task_complete", turn_id: options.turnId },
+          },
+        ]),
+  ];
+}
+
 /**
  * The derivation external systems use to precompute a seeded trace id —
  * intentionally independent of the Langfuse SDK helper the plugin calls.
@@ -235,6 +288,787 @@ describe("convertRollout", () => {
     );
     expect(childGeneration?.name).toBe("LLM Subagent");
     expect(attr(childGeneration!, "langfuse.observation.model.name")).toBe("gpt-5.4");
+  });
+
+  it("discovers a spawned child from metadata and excludes inherited history", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-metadata-parent.jsonl");
+    const childFile = path.join(dir, "rollout-metadata-child-thread-meta.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T14:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-meta" },
+      },
+      {
+        timestamp: "2026-06-03T14:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-turn" },
+      },
+      {
+        timestamp: "2026-06-03T14:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-1",
+          arguments: JSON.stringify({ task_name: "researcher", message: "research it" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T14:00:02.100Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "spawn-1",
+          output: JSON.stringify({ task_name: "researcher" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T14:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-turn" },
+      },
+    ]);
+    writeRollout(childFile, [
+      {
+        timestamp: "2026-06-03T14:00:02.100Z",
+        type: "session_meta",
+        payload: {
+          id: "child-thread-meta",
+          parent_thread_id: "parent-meta",
+          thread_source: "subagent",
+          agent_path: "/root/researcher",
+          subagent_history_start_ordinal: 10,
+        },
+      },
+      {
+        ordinal: 7,
+        timestamp: "2026-06-03T13:59:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "inherited-turn" },
+      },
+      {
+        ordinal: 8,
+        timestamp: "2026-06-03T13:59:01.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "parent replay" },
+      },
+      {
+        ordinal: 9,
+        timestamp: "2026-06-03T13:59:02.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "inherited-turn" },
+      },
+      {
+        ordinal: 10,
+        timestamp: "2026-06-03T14:00:02.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "local-child-turn" },
+      },
+      {
+        ordinal: 11,
+        timestamp: "2026-06-03T14:00:02.250Z",
+        type: "turn_context",
+        payload: { model: "gpt-5.4" },
+      },
+      {
+        ordinal: 12,
+        timestamp: "2026-06-03T14:00:02.300Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "research it" },
+      },
+      {
+        ordinal: 13,
+        timestamp: "2026-06-03T14:00:02.400Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "local result" }],
+        },
+      },
+      {
+        ordinal: 14,
+        timestamp: "2026-06-03T14:00:02.450Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 8, output_tokens: 2, total_tokens: 10 },
+          },
+        },
+      },
+      {
+        ordinal: 15,
+        timestamp: "2026-06-03T14:00:02.500Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "local-child-turn" },
+      },
+    ]);
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    const childTurns = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent");
+    expect(childTurns).toHaveLength(1);
+    expect(attr(childTurns[0], "langfuse.observation.metadata.codex.turn_id")).toBe(
+      "local-child-turn",
+    );
+    expect(attr(childTurns[0], "langfuse.observation.input")).toContain("research it");
+    const childGeneration = exporter
+      .getFinishedSpans()
+      .find(
+        (span) =>
+          obsType(span) === "generation" && parentId(span) === childTurns[0].spanContext().spanId,
+      );
+    expect(childGeneration?.name).toBe("LLM Subagent");
+    expect(attr(childGeneration!, "langfuse.observation.usage_details")).toContain(
+      '"total_tokens":10',
+    );
+  });
+
+  it("emits a child turn once when event and metadata discovery overlap", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-overlap-parent.jsonl");
+    const childFile = path.join(dir, "rollout-overlap-child-thread-overlap.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T15:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-overlap" },
+      },
+      {
+        timestamp: "2026-06-03T15:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-overlap-turn" },
+      },
+      {
+        timestamp: "2026-06-03T15:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-overlap",
+          arguments: JSON.stringify({ task_name: "worker" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T15:00:02.100Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "spawn-overlap",
+          output: JSON.stringify({ task_name: "worker" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T15:00:02.110Z",
+        type: "event_msg",
+        payload: {
+          type: "collab_agent_spawn_end",
+          call_id: "spawn-overlap",
+          new_thread_id: "thread-overlap",
+        },
+      },
+      {
+        timestamp: "2026-06-03T15:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-overlap-turn" },
+      },
+    ]);
+    writeRollout(childFile, [
+      {
+        timestamp: "2026-06-03T15:00:02.100Z",
+        type: "session_meta",
+        payload: {
+          id: "thread-overlap",
+          parent_thread_id: "parent-overlap",
+          thread_source: "subagent",
+          agent_path: "/root/worker",
+          subagent_history_start_ordinal: 20,
+        },
+      },
+      {
+        ordinal: 20,
+        timestamp: "2026-06-03T15:00:02.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "child-overlap-turn" },
+      },
+      {
+        ordinal: 21,
+        timestamp: "2026-06-03T15:00:02.300Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "done" },
+      },
+      {
+        ordinal: 22,
+        timestamp: "2026-06-03T15:00:02.400Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "child-overlap-turn" },
+      },
+    ]);
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    const childTurns = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent");
+    expect(childTurns).toHaveLength(1);
+  });
+
+  it("attributes successive child turns to spawn and followup triggers in order", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-followup-parent.jsonl");
+    const childFile = path.join(dir, "rollout-followup-child-thread-followup.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T16:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-followup" },
+      },
+      {
+        timestamp: "2026-06-03T16:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-spawn" },
+      },
+      {
+        timestamp: "2026-06-03T16:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-followup",
+          arguments: JSON.stringify({ task_name: "worker" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T16:00:02.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "spawn-followup", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T16:00:04.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-spawn" },
+      },
+      {
+        timestamp: "2026-06-03T16:01:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-followup" },
+      },
+      {
+        timestamp: "2026-06-03T16:01:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "followup_task",
+          call_id: "followup-1",
+          arguments: JSON.stringify({ target: "/root/worker", message: "continue" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T16:01:01.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "followup-1", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T16:01:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-followup" },
+      },
+    ]);
+    writeRollout(childFile, [
+      {
+        timestamp: "2026-06-03T16:00:02.100Z",
+        type: "session_meta",
+        payload: {
+          id: "thread-followup",
+          parent_thread_id: "parent-followup",
+          thread_source: "subagent",
+          agent_path: "/root/worker",
+          subagent_history_start_ordinal: 30,
+        },
+      },
+      {
+        ordinal: 30,
+        timestamp: "2026-06-03T16:00:02.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "child-first" },
+      },
+      {
+        ordinal: 31,
+        timestamp: "2026-06-03T16:00:02.300Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "first task" },
+      },
+      {
+        ordinal: 32,
+        timestamp: "2026-06-03T16:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "child-first" },
+      },
+      {
+        ordinal: 33,
+        timestamp: "2026-06-03T16:01:01.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "child-second" },
+      },
+      {
+        ordinal: 34,
+        timestamp: "2026-06-03T16:01:01.300Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "second task" },
+      },
+      {
+        ordinal: 35,
+        timestamp: "2026-06-03T16:01:02.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "child-second" },
+      },
+    ]);
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    const parentTurns = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Turn" && obsType(span) === "agent")
+      .sort((a, b) => startMs(a) - startMs(b));
+    const childTurns = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent")
+      .sort((a, b) => startMs(a) - startMs(b));
+    expect(parentTurns).toHaveLength(2);
+    expect(childTurns).toHaveLength(2);
+    expect(childTurns[0].spanContext().traceId).toBe(parentTurns[0].spanContext().traceId);
+    expect(childTurns[1].spanContext().traceId).toBe(parentTurns[1].spanContext().traceId);
+    expect(attr(childTurns[0], "langfuse.observation.input")).toContain("first task");
+    expect(attr(childTurns[1], "langfuse.observation.input")).toContain("second task");
+  });
+
+  it("attributes multiple named spawns in one parent turn to their distinct children", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-multiple-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T17:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-multiple" },
+      },
+      {
+        timestamp: "2026-06-03T17:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-multiple-turn" },
+      },
+      {
+        timestamp: "2026-06-03T17:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-alpha",
+          arguments: JSON.stringify({ task_name: "alpha" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T17:00:02.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "spawn-alpha", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T17:00:02.200Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-beta",
+          arguments: JSON.stringify({ task_name: "beta" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T17:00:02.300Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "spawn-beta", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T17:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-multiple-turn" },
+      },
+    ]);
+    writeRollout(
+      path.join(dir, "rollout-multiple-child-alpha.jsonl"),
+      childRolloutLines({
+        threadId: "thread-alpha",
+        parentThreadId: "parent-multiple",
+        agentPath: "/root/alpha",
+        turnId: "alpha-turn",
+        start: "2026-06-03T17:00:02.110Z",
+      }),
+    );
+    writeRollout(
+      path.join(dir, "rollout-multiple-child-beta.jsonl"),
+      childRolloutLines({
+        threadId: "thread-beta",
+        parentThreadId: "parent-multiple",
+        agentPath: "/root/beta",
+        turnId: "beta-turn",
+        start: "2026-06-03T17:00:02.310Z",
+      }),
+    );
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    const childTurnIds = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent")
+      .map((span) => attr(span, "langfuse.observation.metadata.codex.turn_id"))
+      .sort();
+    expect(childTurnIds).toEqual(["alpha-turn", "beta-turn"]);
+  });
+
+  it("fails closed when a trigger matches multiple child paths", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-ambiguous-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T18:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-ambiguous" },
+      },
+      {
+        timestamp: "2026-06-03T18:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-ambiguous-turn" },
+      },
+      {
+        timestamp: "2026-06-03T18:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-worker",
+          arguments: JSON.stringify({ task_name: "worker" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T18:00:02.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "spawn-worker", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T18:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-ambiguous-turn" },
+      },
+    ]);
+    writeRollout(
+      path.join(dir, "rollout-ambiguous-child-a.jsonl"),
+      childRolloutLines({
+        threadId: "thread-worker-a",
+        parentThreadId: "parent-ambiguous",
+        agentPath: "/root/a/worker",
+        turnId: "worker-a-turn",
+        start: "2026-06-03T18:00:02.200Z",
+      }),
+    );
+    writeRollout(
+      path.join(dir, "rollout-ambiguous-child-b.jsonl"),
+      childRolloutLines({
+        threadId: "thread-worker-b",
+        parentThreadId: "parent-ambiguous",
+        agentPath: "/root/b/worker",
+        turnId: "worker-b-turn",
+        start: "2026-06-03T18:00:02.200Z",
+      }),
+    );
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    expect(
+      exporter
+        .getFinishedSpans()
+        .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent"),
+    ).toHaveLength(0);
+  });
+
+  it("uses a canonical followup target to distinguish duplicate agent names", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-canonical-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T18:30:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-canonical" },
+      },
+      {
+        timestamp: "2026-06-03T18:30:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-canonical-turn" },
+      },
+      {
+        timestamp: "2026-06-03T18:30:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "followup_task",
+          call_id: "followup-canonical",
+          arguments: JSON.stringify({ target: "/root/a/worker", message: "continue" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T18:30:02.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "followup-canonical", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T18:30:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-canonical-turn" },
+      },
+    ]);
+    writeRollout(
+      path.join(dir, "rollout-canonical-child-a.jsonl"),
+      childRolloutLines({
+        threadId: "thread-canonical-a",
+        parentThreadId: "parent-canonical",
+        agentPath: "/root/a/worker",
+        turnId: "canonical-a-turn",
+        start: "2026-06-03T18:30:02.200Z",
+      }),
+    );
+    writeRollout(
+      path.join(dir, "rollout-canonical-child-b.jsonl"),
+      childRolloutLines({
+        threadId: "thread-canonical-b",
+        parentThreadId: "parent-canonical",
+        agentPath: "/root/b/worker",
+        turnId: "canonical-b-turn",
+        start: "2026-06-03T18:30:02.200Z",
+      }),
+    );
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    const childTurnIds = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent")
+      .map((span) => attr(span, "langfuse.observation.metadata.codex.turn_id"));
+    expect(childTurnIds).toEqual(["canonical-a-turn"]);
+  });
+
+  it("does not emit replay-prone child history when the projection boundary is missing", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-no-boundary-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T18:45:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-no-boundary" },
+      },
+      {
+        timestamp: "2026-06-03T18:45:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-no-boundary-turn" },
+      },
+      {
+        timestamp: "2026-06-03T18:45:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "collab_agent_spawn_end",
+          call_id: "spawn-no-boundary",
+          new_thread_id: "thread-no-boundary",
+        },
+      },
+      {
+        timestamp: "2026-06-03T18:45:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-no-boundary-turn" },
+      },
+    ]);
+    const childLines = childRolloutLines({
+      threadId: "thread-no-boundary",
+      parentThreadId: "parent-no-boundary",
+      agentPath: "/root/worker",
+      turnId: "no-boundary-turn",
+      start: "2026-06-03T18:45:02.100Z",
+    });
+    delete (childLines[0].payload as Record<string, unknown>).subagent_history_start_ordinal;
+    writeRollout(path.join(dir, "rollout-no-boundary-child.jsonl"), childLines);
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    expect(
+      exporter
+        .getFinishedSpans()
+        .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent"),
+    ).toHaveLength(0);
+  });
+
+  it("does not attribute a child turn to wait_agent and skips incomplete children", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-wait-parent.jsonl");
+    writeRollout(parentFile, [
+      {
+        timestamp: "2026-06-03T19:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-wait" },
+      },
+      {
+        timestamp: "2026-06-03T19:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-wait-turn" },
+      },
+      {
+        timestamp: "2026-06-03T19:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "wait_agent",
+          call_id: "wait-1",
+          arguments: JSON.stringify({ timeout_ms: 1000 }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T19:00:02.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "wait-1", output: "done" },
+      },
+      {
+        timestamp: "2026-06-03T19:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-wait-turn" },
+      },
+    ]);
+    writeRollout(
+      path.join(dir, "rollout-wait-child.jsonl"),
+      childRolloutLines({
+        threadId: "thread-wait",
+        parentThreadId: "parent-wait",
+        agentPath: "/root/worker",
+        turnId: "incomplete-child",
+        start: "2026-06-03T19:00:02.200Z",
+        completed: false,
+      }),
+    );
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    expect(
+      exporter
+        .getFinishedSpans()
+        .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent"),
+    ).toHaveLength(0);
+  });
+
+  it("emits only the newly attributed child turn when rollouts grow", async () => {
+    const dir = stageFixtures();
+    const parentFile = path.join(dir, "rollout-growing-parent.jsonl");
+    const childFile = path.join(dir, "rollout-growing-child.jsonl");
+    const parentLines: Array<Record<string, unknown>> = [
+      {
+        timestamp: "2026-06-03T20:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "parent-growing" },
+      },
+      {
+        timestamp: "2026-06-03T20:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-growing-spawn" },
+      },
+      {
+        timestamp: "2026-06-03T20:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "spawn_agent",
+          call_id: "spawn-growing",
+          arguments: JSON.stringify({ task_name: "worker" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T20:00:02.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "spawn-growing", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T20:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-growing-spawn" },
+      },
+    ];
+    const childLines = childRolloutLines({
+      threadId: "thread-growing",
+      parentThreadId: "parent-growing",
+      agentPath: "/root/worker",
+      turnId: "child-growing-first",
+      start: "2026-06-03T20:00:02.200Z",
+    });
+    writeRollout(parentFile, parentLines);
+    writeRollout(childFile, childLines);
+
+    const firstUploaded = await convertRollout(parentFile, { config: baseConfig });
+    for (const turnId of firstUploaded) await markTurnUploaded(parentFile, turnId);
+    exporter.reset();
+
+    parentLines.push(
+      {
+        timestamp: "2026-06-03T20:01:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "parent-growing-followup" },
+      },
+      {
+        timestamp: "2026-06-03T20:01:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "followup_task",
+          call_id: "followup-growing",
+          arguments: JSON.stringify({ target: "worker", message: "again" }),
+        },
+      },
+      {
+        timestamp: "2026-06-03T20:01:01.100Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "followup-growing", output: "ok" },
+      },
+      {
+        timestamp: "2026-06-03T20:01:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "parent-growing-followup" },
+      },
+    );
+    childLines.push(
+      {
+        ordinal: 43,
+        timestamp: "2026-06-03T20:01:01.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "child-growing-second" },
+      },
+      {
+        ordinal: 44,
+        timestamp: "2026-06-03T20:01:01.300Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "second child task" },
+      },
+      {
+        ordinal: 45,
+        timestamp: "2026-06-03T20:01:02.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "child-growing-second" },
+      },
+    );
+    writeRollout(parentFile, parentLines);
+    writeRollout(childFile, childLines);
+
+    await convertRollout(parentFile, { config: baseConfig });
+
+    const childTurnIds = exporter
+      .getFinishedSpans()
+      .filter((span) => span.name === "Codex Subagent Turn" && obsType(span) === "agent")
+      .map((span) => attr(span, "langfuse.observation.metadata.codex.turn_id"));
+    expect(childTurnIds).toEqual(["child-growing-second"]);
   });
 
   it("captures web search, local shell, and MCP tool calls with specific names", async () => {

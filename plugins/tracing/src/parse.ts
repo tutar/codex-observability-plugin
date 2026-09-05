@@ -171,12 +171,20 @@ export function parseSession(lines: RolloutLine[]): {
         base_instructions?: { text?: string } | null;
         parent_thread_id?: string | null;
         thread_source?: string | null;
+        agent_path?: string | null;
+        subagent_history_start_ordinal?: number | null;
       };
       sessionMeta = {
         sessionId: typeof p.id === "string" ? p.id : sessionMeta.sessionId,
         cliVersion: p.cli_version,
         modelProvider: p.model_provider ?? undefined,
         baseInstructions: p.base_instructions?.text,
+        parentThreadId: typeof p.parent_thread_id === "string" ? p.parent_thread_id : undefined,
+        agentPath: typeof p.agent_path === "string" ? p.agent_path : undefined,
+        subagentHistoryStartOrdinal:
+          typeof p.subagent_history_start_ordinal === "number"
+            ? p.subagent_history_start_ordinal
+            : undefined,
         isSubagentThread: typeof p.parent_thread_id === "string" || p.thread_source === "subagent",
       };
       continue;

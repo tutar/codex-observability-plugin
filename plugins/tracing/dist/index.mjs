@@ -4,6 +4,8 @@ import * as os$2 from "node:os";
 import * as path from "node:path";
 import * as zlib from "zlib";
 import { Readable } from "stream";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 
 //#region rolldown:runtime
 var __create = Object.create;
@@ -46728,6 +46730,9 @@ function parseSession(lines) {
 				cliVersion: p.cli_version,
 				modelProvider: p.model_provider ?? void 0,
 				baseInstructions: p.base_instructions?.text,
+				parentThreadId: typeof p.parent_thread_id === "string" ? p.parent_thread_id : void 0,
+				agentPath: typeof p.agent_path === "string" ? p.agent_path : void 0,
+				subagentHistoryStartOrdinal: typeof p.subagent_history_start_ordinal === "number" ? p.subagent_history_start_ordinal : void 0,
 				isSubagentThread: typeof p.parent_thread_id === "string" || p.thread_source === "subagent"
 			};
 			continue;
@@ -46929,18 +46934,51 @@ async function loadSession(file) {
 			lines.push(JSON.parse(trimmed));
 		} catch {}
 	}
-	return lines;
+	const boundary = (lines.find((line) => line.type === "session_meta")?.payload)?.subagent_history_start_ordinal;
+	if (typeof boundary !== "number" || !Number.isSafeInteger(boundary)) return lines;
+	return lines.filter((line) => line.type === "session_meta" || Number.isSafeInteger(line.ordinal) && line.ordinal >= boundary);
 }
-/**
-* Resolve a subagent's rollout file from its thread id.
-*
-* Rollouts live at `<sessionsRoot>/YYYY/MM/DD/rollout-<ts>-<threadId>.jsonl`.
-* Starting from the parent rollout, we walk up to the sessions root and search
-* for a file whose name ends with the subagent's thread id.
-*/
-async function findSubagentRollout(parentFile, threadId) {
-	const suffix = `-${threadId}.jsonl`;
-	const root = path.resolve(path.dirname(parentFile), "../../..");
+async function loadSessionMeta(file) {
+	const input = createReadStream(file);
+	const lines = createInterface({
+		input,
+		crlfDelay: Infinity
+	});
+	try {
+		for await (const raw of lines) {
+			if (!raw.trim()) continue;
+			const line = JSON.parse(raw);
+			return line.type === "session_meta" ? parseSession([line]).sessionMeta : void 0;
+		}
+		return;
+	} catch {
+		return;
+	} finally {
+		lines.close();
+		input.destroy();
+	}
+}
+function agentName(value) {
+	if (typeof value !== "string") return void 0;
+	return value.replace(/\/+$/, "").split("/").filter(Boolean).at(-1);
+}
+function normalizedAgentPath(value) {
+	if (typeof value !== "string") return void 0;
+	return value.replace(/\/+$/, "") || void 0;
+}
+function triggerName(toolCall) {
+	if (!toolCall.args || typeof toolCall.args !== "object") return void 0;
+	const args = toolCall.args;
+	if (toolCall.name === "spawn_agent") return normalizedAgentPath(args.task_name);
+	if (toolCall.name === "followup_task") return normalizedAgentPath(args.target);
+}
+function triggerMatchesAgent(trigger, candidatePath) {
+	const normalizedCandidate = normalizedAgentPath(candidatePath);
+	if (!normalizedCandidate) return false;
+	return trigger.includes("/") ? trigger === normalizedCandidate : agentName(normalizedCandidate) === trigger;
+}
+async function listRolloutFiles(root) {
+	const files = [];
 	async function walk(dir) {
 		let entries;
 		try {
@@ -46950,13 +46988,78 @@ async function findSubagentRollout(parentFile, threadId) {
 		}
 		for (const entry of entries) {
 			const full = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
-				const found = await walk(full);
-				if (found) return found;
-			} else if (entry.isFile() && entry.name.endsWith(suffix)) return full;
+			if (entry.isDirectory()) await walk(full);
+			else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(full);
 		}
 	}
-	return walk(root);
+	await walk(root);
+	return files;
+}
+async function discoverChildTurns(parentFile, parentSession, parentTurns) {
+	if (!parentTurns.some((turn) => turn.subagentThreadIds.length > 0 || turn.steps.some((step) => step.toolCalls.some((toolCall) => triggerName(toolCall))))) return /* @__PURE__ */ new Map();
+	const root = path.resolve(path.dirname(parentFile), "../../..");
+	const children = [];
+	for (const rolloutFile of await listRolloutFiles(root)) {
+		if (rolloutFile === parentFile) continue;
+		const candidateMeta = await loadSessionMeta(rolloutFile);
+		if (candidateMeta?.parentThreadId === parentSession.sessionId && candidateMeta.subagentHistoryStartOrdinal !== void 0) {
+			const { sessionMeta, turns } = parseSession(await loadSession(rolloutFile));
+			children.push({
+				rolloutFile,
+				sessionMeta,
+				turns: turns.filter((turn) => turn.completed)
+			});
+		}
+	}
+	const result = /* @__PURE__ */ new Map();
+	const nextTurnByThread = /* @__PURE__ */ new Map();
+	const assigned = /* @__PURE__ */ new Set();
+	for (const parentTurn of parentTurns) {
+		for (const threadId of parentTurn.subagentThreadIds) {
+			const child = children.find((candidate) => candidate.sessionMeta.sessionId === threadId);
+			if (!child) continue;
+			const turnIndex = nextTurnByThread.get(threadId) ?? 0;
+			const turn = child.turns[turnIndex];
+			if (!turn) continue;
+			const key = `${threadId}:${turn.turnId ?? turnIndex}`;
+			if (assigned.has(key)) continue;
+			assigned.add(key);
+			nextTurnByThread.set(threadId, turnIndex + 1);
+			const current = result.get(parentTurn) ?? [];
+			current.push({
+				rolloutFile: child.rolloutFile,
+				sessionMeta: child.sessionMeta,
+				turn
+			});
+			result.set(parentTurn, current);
+		}
+		for (const step of parentTurn.steps) for (const toolCall of step.toolCalls) {
+			const name = triggerName(toolCall);
+			if (!name) continue;
+			const matches = children.filter((child$1) => child$1.sessionMeta.agentPath && triggerMatchesAgent(name, child$1.sessionMeta.agentPath));
+			if (matches.length !== 1) {
+				debugLog(`skipping ambiguous child attribution for ${toolCall.name} target ${name}: ${matches.length} metadata match(es)`);
+				continue;
+			}
+			const child = matches[0];
+			if (parentTurn.subagentThreadIds.includes(child.sessionMeta.sessionId)) continue;
+			const turnIndex = nextTurnByThread.get(child.sessionMeta.sessionId) ?? 0;
+			const turn = child.turns[turnIndex];
+			if (!turn || turn.startTime < (toolCall.endTime ?? toolCall.startTime)) continue;
+			const key = `${child.sessionMeta.sessionId}:${turn.turnId ?? turnIndex}`;
+			if (assigned.has(key)) continue;
+			assigned.add(key);
+			nextTurnByThread.set(child.sessionMeta.sessionId, turnIndex + 1);
+			const current = result.get(parentTurn) ?? [];
+			current.push({
+				rolloutFile: child.rolloutFile,
+				sessionMeta: child.sessionMeta,
+				turn
+			});
+			result.set(parentTurn, current);
+		}
+	}
+	return result;
 }
 /**
 * Placeholder parent span id used to pin a deterministic trace id on a root
@@ -47090,17 +47193,11 @@ async function emitTurn(turn, sessionMeta, ctx) {
 			...tc.error ? { error: clip(tc.error) } : {}
 		})) : void 0;
 	}
-	for (const threadId of turn.subagentThreadIds) {
-		const subFile = await findSubagentRollout(ctx.rolloutFile, threadId);
-		if (!subFile) {
-			debugLog(`subagent rollout not found for thread ${threadId}`);
-			continue;
-		}
-		await convertRollout(subFile, {
-			config: ctx.config,
-			parentObservation: root
-		});
-	}
+	for (const child of ctx.attributedChildTurns?.get(turn) ?? []) await emitTurn(child.turn, child.sessionMeta, {
+		config: ctx.config,
+		rolloutFile: child.rolloutFile,
+		parentObservation: root
+	});
 	root.end(new Date(turn.endTime));
 }
 function emitToolCall(tc, parent, clip, fallbackEnd) {
@@ -47139,6 +47236,7 @@ async function convertRollout(rolloutFile, options) {
 	}
 	const uploaded = await loadUploadedTurnIds(rolloutFile);
 	const uploadedTurnIds = [];
+	const attributedChildTurns = await discoverChildTurns(rolloutFile, sessionMeta, turns);
 	for (let turnIndex = 0; turnIndex < turns.length; turnIndex++) {
 		const parsedTurn = turns[turnIndex];
 		const turn = !parsedTurn.completed && parsedTurn.turnId === options.finalizeTurnId ? {
@@ -47161,7 +47259,8 @@ async function convertRollout(rolloutFile, options) {
 			await emitTurn(turn, sessionMeta, {
 				config: options.config,
 				rolloutFile,
-				seededParent
+				seededParent,
+				attributedChildTurns
 			});
 		});
 		if (turn.turnId) {

@@ -53,7 +53,7 @@
 
 ### Issue #2：缺失 parent-side child ID 时的 subagent trace
 
-本地 Issue：[`tutar/codex-observability-plugin#2`](https://github.com/tutar/codex-observability-plugin/issues/2)，状态为 Open，等待实现。
+本地 Issue：[`tutar/codex-observability-plugin#2`](https://github.com/tutar/codex-observability-plugin/issues/2)，状态为 Open；修复正在独立分支 `fix/issue-2-subagent-discovery` 中实现，尚未合入生产基线或部署。
 
 已确认的问题边界：
 
@@ -62,7 +62,15 @@
 - `followup_task` 会在同一个 child thread 上启动后续 turn；`wait_agent` 只是同步工具，不应被解释为 child turn。
 - child rollout 可能重放父线程历史；fallback 不能直接转换整个文件，必须尊重 `subagent_history_start_ordinal`，只处理真实 child turns。
 
-Issue #2 必须独立于 Issue #1 设计、实现和提交。它是 fork 退役的第二个阻断项，但不是下一个立即执行的动作。
+已确认的归属规则：
+
+- 只归属已完成、且能确定关联的 child turn；parent Stop 时仍在运行的 child 不阻塞 parent，可由 child Stop 独立上报。本阶段不引入跨 rollout delivery ledger 或延迟 parent trace。
+- event 中的明确 child thread ID 是优先发现证据；metadata fallback 使用 `parent_thread_id`、有效 history boundary，以及 `task_name` / `target` 与 `agent_path` 的唯一匹配。两条路径以 `(child thread ID, child turn ID)` 去重。
+- `spawn_agent` 归属该 child 的首个尚未分配 turn；`followup_task` 按顺序归属下一个尚未分配 turn；时间只验证先后关系，不单独用于猜测关联。
+- 名称/path 不唯一、缺少 boundary 或其他证据不足时 fail closed，只写 debug 日志；`wait_agent` 不触发归属。
+- child turn 继续嵌套在 parent `Codex Turn` root 下。本阶段不改变为 TOOL 子节点，也不扩展 trigger metadata。
+
+Issue #2 必须独立于 Issue #1 设计、实现和提交。它是 fork 退役的第二个阻断项。
 
 ## 已确认的执行顺序
 
@@ -93,7 +101,7 @@ PR 不应包含：
 
 Issue #1 PR 提交并建立上游反馈通道后，再处理 Issue #2。
 
-Issue #2 应从最新 `upstream/main` 创建独立分支，先在 fork 环境完成实现和真实验证，再形成独立上游 PR。除非生产必须立即使用，否则不先把它作为长期 fork-only 改动合入 fork `main`。
+当前 fork 修复分支从生产基线 `main` 创建，用于先完成自动化与真实验证；验收前不合入 `main`、不部署。验证稳定后，再从最新 `upstream/main` 整理独立最小 PR 并关联 upstream Issue #44，不把 fork 文档或其他差异带入上游提交。
 
 ### 3. 等待上游合并、发布并验证
 
@@ -168,6 +176,6 @@ Issue #2 默认在独立分支开发。只有生产立即需要时，才在完�
 
 ## 当前工作区状态说明
 
-截至本文更新前，本地 `main` 与 `origin/main` 都指向生产基线 `2daf0d9`。先前用于评估的上游 merge commit `2846d6e` 没有推送，并由本地安全分支 `backup/upstream-merge-20260905` 保留；它不是生产基线。
+截至本文更新前，本地 `main` 与 `origin/main` 都指向生产基线 `ab7e492`。先前用于评估的上游 merge commit `2846d6e` 没有推送，并由本地安全分支 `backup/upstream-merge-20260905` 保留；它不是生产基线。
 
 Issue #1 的上游 PR 使用直接基于 `upstream/main@1db5c0f` 的干净分支 `issue-1-final-turn`，没有改变 fork 的生产基线。

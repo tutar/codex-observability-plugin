@@ -152,12 +152,13 @@ export type EventMsgPayload = {
   [key: string]: unknown;
 };
 
-export type RolloutLine =
+export type RolloutLine = { ordinal?: number } & (
   | { timestamp: string; type: "session_meta"; payload: SessionMetaPayload }
   | { timestamp: string; type: "response_item"; payload: ResponseItem }
   | { timestamp: string; type: "turn_context"; payload: TurnContextPayload }
   | { timestamp: string; type: "event_msg"; payload: EventMsgPayload }
-  | { timestamp: string; type: string; payload: Record<string, unknown> };
+  | { timestamp: string; type: string; payload: Record<string, unknown> }
+);
 
 /** Payload Codex passes to the `Stop` hook on stdin. */
 export type HookInput = {
@@ -173,6 +174,9 @@ export type SessionMeta = {
   cliVersion?: string;
   modelProvider?: string;
   baseInstructions?: string;
+  parentThreadId?: string;
+  agentPath?: string;
+  subagentHistoryStartOrdinal?: number;
   /**
    * Whether this rollout belongs to a subagent thread rather than the main
    * session. Codex marks subagent rollouts with `parent_thread_id` and/or
