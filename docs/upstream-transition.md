@@ -26,6 +26,7 @@
 | 上游事项                                                                                                                      | 核查状态                  | 与本 fork 的关系                                        |
 | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------- | ------------------------------------------------------- |
 | [Issue #46：单个 Codex turn 产生重复 trace](https://github.com/langfuse/codex-observability-plugin/issues/46)                 | Open                      | Issue #1 的重复上传侧                                   |
+| [PR #71：完成 Stop payload 指定的目标 turn](https://github.com/langfuse/codex-observability-plugin/pull/71)                   | Open、等待上游检查与评审  | Issue #1 的完整上游修复                                 |
 | [Issue #12：部分已完成 session 没有 sidecar 或远端 session](https://github.com/langfuse/codex-observability-plugin/issues/12) | Open                      | 可能包含 Issue #1 的最终 turn 丢失侧                    |
 | [PR #17：跳过 in-progress turn](https://github.com/langfuse/codex-observability-plugin/pull/17)                               | Open、未合并、存在冲突    | 只阻止提前上传，不能保证最终 turn 被上传                |
 | [PR #31：defer incomplete turn](https://github.com/langfuse/codex-observability-plugin/pull/31)                               | Open、未合并、存在冲突    | 同样依赖后续 hook，可能丢失最终 turn                    |
@@ -65,9 +66,9 @@ Issue #2 必须独立于 Issue #1 设计、实现和提交。它是 fork 退役�
 
 ## 已确认的执行顺序
 
-### 1. 提交 Issue #1 的最小上游 PR
+### 1. 跟进 Issue #1 的最小上游 PR
 
-下一步动作已经确认：**把昨天的修复整理成面向上游 0.3.0 的最小 PR。**
+已完成：修复已整理为面向上游 0.3.0 的最小 [PR #71](https://github.com/langfuse/codex-observability-plugin/pull/71)，commit 为 [`977f3be`](https://github.com/tutar/codex-observability-plugin/commit/977f3befbb46eb2b392d5e5c6ecf2a820141a1c1)。当前等待上游 CI、评审和维护者反馈。
 
 分支必须直接基于最新 `upstream/main`，不能从包含 `.agents`、fork README、版本历史和 marketplace 差异的 fork `main` 派生。
 
@@ -159,7 +160,7 @@ Issue #2 默认在独立分支开发。只有生产立即需要时，才在完�
 
 1. `git fetch upstream main` 后记录新的 `upstream/main` SHA。
 2. 检查上游 Issue #12、#44、#46、#65 的状态和新评论。
-3. 检查上游 PR #17、#31、#45、#50 是否关闭、合并、被替代或有维护者反馈。
+3. 检查上游 PR #17、#31、#45、#50、#71 是否关闭、合并、被替代或有维护者反馈。
 4. 搜索 `upstream/main` 是否已经使用 Stop payload `turn_id`、跳过非目标 incomplete turns，并在成功 flush 后写 sidecar。
 5. 搜索上游是否已经通过 `parent_thread_id` 和 history boundary 处理缺失 child ID 的 subagent rollout。
 6. 检查上游 marketplace/package 的正式版本和发布时间，而不只看仓库 manifest 版本。
@@ -167,6 +168,6 @@ Issue #2 默认在独立分支开发。只有生产立即需要时，才在完�
 
 ## 当前工作区状态说明
 
-截至本文更新时，本地 `main` 与 `origin/main` 都指向生产基线 `3af463d`。先前用于评估的上游 merge commit `2846d6e` 没有推送，并由本地安全分支 `backup/upstream-merge-20260905` 保留；它不是生产基线。
+截至本文更新前，本地 `main` 与 `origin/main` 都指向生产基线 `2daf0d9`。先前用于评估的上游 merge commit `2846d6e` 没有推送，并由本地安全分支 `backup/upstream-merge-20260905` 保留；它不是生产基线。
 
-本文尚未提交或推送。Issue #1 的上游 PR 使用另一条直接基于 `upstream/main` 的干净分支。
+Issue #1 的上游 PR 使用直接基于 `upstream/main@1db5c0f` 的干净分支 `issue-1-final-turn`，没有改变 fork 的生产基线。
