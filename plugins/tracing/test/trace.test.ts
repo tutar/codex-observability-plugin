@@ -91,6 +91,54 @@ function childRolloutLines(options: {
   ];
 }
 
+function writeTriggerTimingRollouts(dir: string, stem: string, childStart: string): string {
+  const parentFile = path.join(dir, `rollout-${stem}-parent.jsonl`);
+  writeRollout(parentFile, [
+    {
+      timestamp: "2026-06-03T16:30:00.000Z",
+      type: "session_meta",
+      payload: { id: `parent-${stem}`, history_mode: "paginated" },
+    },
+    {
+      timestamp: "2026-06-03T16:30:01.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: `parent-${stem}-turn` },
+    },
+    {
+      timestamp: "2026-06-03T16:30:02.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "spawn_agent",
+        call_id: `spawn-${stem}`,
+        arguments: JSON.stringify({ task_name: "worker" }),
+      },
+    },
+    {
+      timestamp: "2026-06-03T16:30:02.200Z",
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: `spawn-${stem}`, output: "ok" },
+    },
+    {
+      timestamp: "2026-06-03T16:30:03.000Z",
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: `parent-${stem}-turn` },
+    },
+  ]);
+  const childLines = childRolloutLines({
+    threadId: `thread-${stem}`,
+    parentThreadId: `parent-${stem}`,
+    agentPath: "/root/worker",
+    turnId: `${stem}-child-turn`,
+    start: childStart,
+  });
+  const childMeta = childLines[0].payload as Record<string, unknown>;
+  delete childMeta.subagent_history_start_ordinal;
+  childMeta.history_mode = "paginated";
+  writeRollout(path.join(dir, `rollout-${stem}-child.jsonl`), childLines);
+  return parentFile;
+}
+
 /**
  * The derivation external systems use to precompute a seeded trace id —
  * intentionally independent of the Langfuse SDK helper the plugin calls.
@@ -649,50 +697,7 @@ describe("convertRollout", () => {
 
   it("attributes child turns that start after the trigger call but before its output", async () => {
     const dir = stageFixtures();
-    const parentFile = path.join(dir, "rollout-trigger-race-parent.jsonl");
-    writeRollout(parentFile, [
-      {
-        timestamp: "2026-06-03T16:30:00.000Z",
-        type: "session_meta",
-        payload: { id: "parent-trigger-race", history_mode: "paginated" },
-      },
-      {
-        timestamp: "2026-06-03T16:30:01.000Z",
-        type: "event_msg",
-        payload: { type: "task_started", turn_id: "parent-trigger-race-turn" },
-      },
-      {
-        timestamp: "2026-06-03T16:30:02.000Z",
-        type: "response_item",
-        payload: {
-          type: "function_call",
-          name: "spawn_agent",
-          call_id: "spawn-trigger-race",
-          arguments: JSON.stringify({ task_name: "worker" }),
-        },
-      },
-      {
-        timestamp: "2026-06-03T16:30:02.200Z",
-        type: "response_item",
-        payload: { type: "function_call_output", call_id: "spawn-trigger-race", output: "ok" },
-      },
-      {
-        timestamp: "2026-06-03T16:30:03.000Z",
-        type: "event_msg",
-        payload: { type: "task_complete", turn_id: "parent-trigger-race-turn" },
-      },
-    ]);
-    const childLines = childRolloutLines({
-      threadId: "thread-trigger-race",
-      parentThreadId: "parent-trigger-race",
-      agentPath: "/root/worker",
-      turnId: "trigger-race-child-turn",
-      start: "2026-06-03T16:30:02.100Z",
-    });
-    const childMeta = childLines[0].payload as Record<string, unknown>;
-    delete childMeta.subagent_history_start_ordinal;
-    childMeta.history_mode = "paginated";
-    writeRollout(path.join(dir, "rollout-trigger-race-child.jsonl"), childLines);
+    const parentFile = writeTriggerTimingRollouts(dir, "trigger-race", "2026-06-03T16:30:02.100Z");
 
     await convertRollout(parentFile, { config: baseConfig });
 
@@ -705,50 +710,11 @@ describe("convertRollout", () => {
 
   it("does not attribute a child turn that starts before the trigger call", async () => {
     const dir = stageFixtures();
-    const parentFile = path.join(dir, "rollout-before-trigger-parent.jsonl");
-    writeRollout(parentFile, [
-      {
-        timestamp: "2026-06-03T16:45:00.000Z",
-        type: "session_meta",
-        payload: { id: "parent-before-trigger", history_mode: "paginated" },
-      },
-      {
-        timestamp: "2026-06-03T16:45:01.000Z",
-        type: "event_msg",
-        payload: { type: "task_started", turn_id: "parent-before-trigger-turn" },
-      },
-      {
-        timestamp: "2026-06-03T16:45:02.000Z",
-        type: "response_item",
-        payload: {
-          type: "function_call",
-          name: "spawn_agent",
-          call_id: "spawn-before-trigger",
-          arguments: JSON.stringify({ task_name: "worker" }),
-        },
-      },
-      {
-        timestamp: "2026-06-03T16:45:02.100Z",
-        type: "response_item",
-        payload: { type: "function_call_output", call_id: "spawn-before-trigger", output: "ok" },
-      },
-      {
-        timestamp: "2026-06-03T16:45:03.000Z",
-        type: "event_msg",
-        payload: { type: "task_complete", turn_id: "parent-before-trigger-turn" },
-      },
-    ]);
-    const childLines = childRolloutLines({
-      threadId: "thread-before-trigger",
-      parentThreadId: "parent-before-trigger",
-      agentPath: "/root/worker",
-      turnId: "before-trigger-child-turn",
-      start: "2026-06-03T16:45:01.900Z",
-    });
-    const childMeta = childLines[0].payload as Record<string, unknown>;
-    delete childMeta.subagent_history_start_ordinal;
-    childMeta.history_mode = "paginated";
-    writeRollout(path.join(dir, "rollout-before-trigger-child.jsonl"), childLines);
+    const parentFile = writeTriggerTimingRollouts(
+      dir,
+      "before-trigger",
+      "2026-06-03T16:30:01.900Z",
+    );
 
     await convertRollout(parentFile, { config: baseConfig });
 
