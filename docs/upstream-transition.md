@@ -53,7 +53,7 @@
 
 ### Issue #2：缺失 parent-side child ID 时的 subagent trace
 
-本地 Issue：[`tutar/codex-observability-plugin#2`](https://github.com/tutar/codex-observability-plugin/issues/2)，状态为 Open。修复提交 `6d9f7d8`、`8411b8d` 已于 2026-09-05 fast-forward 合入并 push 到生产基线 `main`；本地已安装 cachebuster 版本 `0.1.1+codex.20260905072559`，等待安装后的新 UI thread 完成真实多代理 Langfuse 验证。
+本地 Issue：[`tutar/codex-observability-plugin#2`](https://github.com/tutar/codex-observability-plugin/issues/2)，已在 2026-09-05 完成实现、部署和真实验证。基础修复提交为 `6d9f7d8`、`8411b8d`；真实 workflow 随后暴露 paginated history 与 trigger/output 竞态，补充修复为 `8b19461`、`b63355c`、`bcccf1c`、`2c3e0e1`。最终本地安装版本为 `0.1.1+codex.20260905075653`。
 
 已确认的问题边界：
 
@@ -101,7 +101,7 @@ PR 不应包含：
 
 Issue #1 PR 提交并建立上游反馈通道后，再处理 Issue #2。
 
-fork 修复分支从生产基线 `main` 创建，已通过 57 项自动化测试和 Standards / Spec 双轴复审后合入生产 `main`。本地 cachebuster 安装已经完成；两次自动 CLI probe 均未实际创建 child，只产生空 `wait`，因此不能作为 Issue #2 的验收证据。下一步必须由安装后的新 UI thread 发起真实 `spawn_agent` 与 `followup_task` workflow，并在 Langfuse 核对 child turns。验证稳定后，再从最新 `upstream/main` 整理独立最小 PR 并关联 upstream Issue #44，不把 fork 文档或其他差异带入上游提交。
+fork 修复已通过 59 项自动化测试和多轮 Standards / Spec 双轴复审后合入生产 `main`。安装后的真实 UI workflow 创建同一 child 的 spawn turn 与 followup turn；最终 Langfuse trace `881347fdd910c900cd0dc1380102922a` 恰好包含两个 `Codex Subagent Turn` 和两个 `LLM Subagent`，输出分别为 `PROBE_ONE`、`PROBE_TWO`。对同一隔离 rollout 再次执行 installed hook 后 trace 数量未增加，sidecar replay 去重通过。下一步从最新 `upstream/main` 整理独立最小 PR 并关联 upstream Issue #44，不把 fork 文档或其他差异带入上游提交。
 
 ### 3. 等待上游合并、发布并验证
 
@@ -176,6 +176,6 @@ Issue #2 默认在独立分支开发。只有生产立即需要时，才在完�
 
 ## 当前工作区状态说明
 
-截至本文更新前，本地 `main` 与 `origin/main` 都指向生产基线 `8411b8d`。Issue #2 分支 `fix/issue-2-subagent-discovery` 已 push，且与生产基线指向同一提交。先前用于评估的上游 merge commit `2846d6e` 没有推送，并由本地安全分支 `backup/upstream-merge-20260905` 保留；它不是生产基线。
+截至本文更新前，Issue #2 的最终代码提交为 `2c3e0e1`，已进入本地 `main` 与 `origin/main`。相关修复分支均已 push。先前用于评估的上游 merge commit `2846d6e` 没有推送，并由本地安全分支 `backup/upstream-merge-20260905` 保留；它不是生产基线。
 
 Issue #1 的上游 PR 使用直接基于 `upstream/main@1db5c0f` 的干净分支 `issue-1-final-turn`，没有改变 fork 的生产基线。
