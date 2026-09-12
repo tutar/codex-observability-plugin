@@ -31,3 +31,11 @@ _Avoid_: Time-based guess, best-effort nesting
 **Discovery Evidence（发现证据）**：
 用于定位 Child Thread 的可靠标识；父事件中的明确 thread ID 优先，child metadata 是缺少该事件时的 fallback。两条路径发现同一 Child Turn 时仍是同一事实。
 _Avoid_: Duplicate source, heuristic match
+
+**Stop Target Turn（停止目标轮次）**：
+Stop-hook payload 通过精确 `turn_id` 指定、当前正在结束的 Turn。即使持久化的 terminal event 稍晚到达，也只有该 Turn 能由本次 Stop 信号完成，其他 incomplete turn 不因此成为 completed。
+_Avoid_: Latest turn, any incomplete turn
+
+**Delivery Receipt（交付回执）**：
+证明某个 Turn 的 telemetry 已成功交付、并可用于抑制后续重复交付的本地持久证据。Exporter 未成功结束时不存在交付回执。
+_Avoid_: Sidecar, attempted upload marker
