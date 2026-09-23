@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
 ref="${1:-}"
 if [[ -z "$ref" ]]; then
   echo "usage: pnpm run verify:install -- <tag-or-full-commit>" >&2
