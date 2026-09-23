@@ -10,6 +10,7 @@ fi
 release_json="$(node scripts/verify-release.mjs --json)"
 expected_version="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).version)' "$release_json")"
 expected_digest="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).bundleSha256)' "$release_json")"
+expected_hook="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).hookIdentity)' "$release_json")"
 verification_home="$(mktemp -d /tmp/codex-plugin-install.XXXXXX)"
 trap 'rm -rf "$verification_home"' EXIT
 
@@ -28,4 +29,4 @@ installed_root="$(
 )"
 
 node scripts/verify-installed-plugin.mjs \
-  "$installed_root" "$expected_version" "$expected_digest"
+  "$installed_root" "$expected_version" "$expected_digest" "$expected_hook"
