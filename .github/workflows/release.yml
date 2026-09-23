@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["*.*.*"]
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Existing immutable release tag to verify and publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -31,16 +37,27 @@ jobs:
 
       - name: Verify tag and release contract
         env:
-          TAG_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_REF: ${{ inputs.release_ref }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_ref="$REQUESTED_REF"
+          else
+            release_ref="$GITHUB_REF_NAME"
+          fi
+          release_commit="$(git rev-list -n 1 "$release_ref")"
           manifest_version="$(node -p 'require("./plugins/tracing/.codex-plugin/plugin.json").version')"
-          test "$TAG_NAME" = "$manifest_version"
-          test "$(git rev-list -n 1 "$TAG_NAME")" = "$GITHUB_SHA"
-          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            echo "Release $TAG_NAME already exists; refusing to replace it." >&2
+          test "$release_ref" = "$manifest_version"
+          if [[ "$EVENT_NAME" != "workflow_dispatch" ]]; then
+            test "$release_commit" = "$GITHUB_SHA"
+          fi
+          if gh release view "$release_ref" >/dev/null 2>&1; then
+            echo "Release $release_ref already exists; refusing to replace it." >&2
             exit 1
           fi
+          echo "RELEASE_REF=$release_ref" >> "$GITHUB_ENV"
+          echo "RELEASE_COMMIT=$release_commit" >> "$GITHUB_ENV"
           pnpm run lint
           pnpm test
           node --check plugins/tracing/dist/index.mjs
@@ -51,15 +68,15 @@ jobs:
           npm install --global "@openai/codex@$codex_version"
 
       - name: Verify standard Marketplace installation by tag
-        run: pnpm run verify:install -- "$GITHUB_REF_NAME"
+        run: pnpm run verify:install -- "$RELEASE_REF"
 
       - name: Verify standard Marketplace installation by commit
-        run: pnpm run verify:install -- "$GITHUB_SHA"
+        run: pnpm run verify:install -- "$RELEASE_COMMIT"
 
       - name: Build release notes
-        run: node scripts/release-notes.mjs > release-notes.md
+        run: GITHUB_SHA="$RELEASE_COMMIT" node scripts/release-notes.mjs > release-notes.md
 
       - name: Publish GitHub Release without moving the tag
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --notes-file release-notes.md
+        run: gh release create "$RELEASE_REF" --verify-tag --notes-file release-notes.md
