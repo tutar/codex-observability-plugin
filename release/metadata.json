@@ -1,0 +1,9 @@
+{
+  "codexCompatibility": "0.153.4",
+  "upstreamRepository": "https://github.com/langfuse/codex-observability-plugin",
+  "changesFromUpstream": [
+    "Preserve terminal Stop-hook turns while waiting for their matching terminal marker.",
+    "Deduplicate delivered turns with a repository-external delivery receipt.",
+    "Discover and attribute spawned and followed-up subagent turns across rollout history shapes."
+  ]
+}
