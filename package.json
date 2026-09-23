@@ -1,6 +1,6 @@
 {
   "name": "codex-observability-plugin-workspace",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "OpenAI Codex plugin that traces agent turns, tool calls, and subagents to Langfuse",
   "keywords": [
@@ -11,15 +11,15 @@
     "tracing",
     "opentelemetry"
   ],
-  "homepage": "https://github.com/langfuse/codex-observability-plugin#readme",
+  "homepage": "https://github.com/tutar/codex-observability-plugin#readme",
   "bugs": {
-    "url": "https://github.com/langfuse/codex-observability-plugin/issues"
+    "url": "https://github.com/tutar/codex-observability-plugin/issues"
   },
   "license": "MIT",
   "author": "Langfuse",
   "repository": {
     "type": "git",
-    "url": "https://github.com/langfuse/codex-observability-plugin.git"
+    "url": "https://github.com/tutar/codex-observability-plugin.git"
   },
   "type": "module",
   "scripts": {
@@ -30,7 +30,10 @@
     "format:check": "prettier --check .",
     "lint:tsc": "tsc --noEmit",
     "lint:dist": "pnpm run build && git diff --exit-code -- plugins/tracing/dist/index.mjs",
-    "lint": "pnpm run format:check && pnpm run lint:tsc && pnpm run lint:dist"
+    "verify:release": "node scripts/verify-release.mjs",
+    "verify:install": "bash scripts/verify-install.sh",
+    "test:release": "vitest run scripts/verify-release.test.mjs",
+    "lint": "pnpm run format:check && pnpm run lint:tsc && pnpm run lint:dist && pnpm run verify:release"
   },
   "dependencies": {
     "@langfuse/otel": "^5.4.1",

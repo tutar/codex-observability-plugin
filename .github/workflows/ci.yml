@@ -40,3 +40,6 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Validate bundle syntax
+        run: node --check plugins/tracing/dist/index.mjs

@@ -29,11 +29,11 @@ Interrupted turns (where you cancel mid-response) are still uploaded and flagged
 ### 1. Add the plugin marketplace
 
 ```bash
-codex plugin marketplace add tutar/codex-observability-plugin --ref 0.1.1
+codex plugin marketplace add tutar/codex-observability-plugin --ref 0.1.2
 codex plugin add tracing@codex-observability-plugin
 ```
 
-Pinning the marketplace to `0.1.1` installs the validated release from this fork. To upgrade later, change the ref deliberately and review the release notes before trusting the new hook hash.
+Pinning the marketplace to `0.1.2` installs the validated release from this fork. The same command accepts the full 40-character release Commit for an even more explicit pin. To upgrade later, change the ref deliberately and review the release notes before trusting the new hook hash.
 
 ### 2. Enable the plugin
 
@@ -207,9 +207,12 @@ pnpm install
 pnpm test        # run the test suite
 pnpm run lint    # prettier + tsc + verify the committed bundle is current
 pnpm run build   # bundle the hook to plugins/tracing/dist/index.mjs
+pnpm run verify:release # check versions, metadata, Marketplace, hook, and bundle digest
 ```
 
 The hook ships as a single self-contained `plugins/tracing/dist/index.mjs` (no install step runs when Codex loads the plugin), so the bundle is committed to the repo. After changing anything under `src/`, run `pnpm run build` and commit the updated bundle — CI enforces this via `pnpm run lint`.
+
+The Plugin Manifest version is the release version source of truth. CI requires the workspace package and plugin package to match it, rebuilds and compares the committed bundle, and validates its syntax. A version tag runs the release workflow, verifies a standard Marketplace installation by both tag and full Commit, and creates the GitHub Release with the resolved Commit, bundle SHA-256, Hook identity, Codex compatibility, and fork changes. Existing Releases are never replaced.
 
 ## License
 
